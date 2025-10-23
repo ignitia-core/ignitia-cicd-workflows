@@ -1,0 +1,76 @@
+name: azure-oidc-login
+
+on:
+  workflow_dispatch:
+    inputs:
+      tenant-id:
+        description: "Azure Entra tenant ID (GUID). Leave empty to use repo variable AZURE_TENANT_ID."
+        required: false
+      client-id:
+        description: "App registration (service principal) client ID (GUID). Leave empty to use repo variable AZURE_CLIENT_ID."
+        required: false
+      subscription-id:
+        description: "Azure subscription ID (GUID). Leave empty to use repo variable AZURE_SUBSCRIPTION_ID."
+        required: false
+
+permissions:
+  id-token: write   # REQUIRED for OIDC
+  contents: read
+
+env:
+  # Prefer repository/org-level Variables (not Secrets) for non-secret IDs:
+  # Settings → Secrets and variables → Actions → Variables
+  AZURE_TENANT_ID: ${{ inputs.tenant-id || vars.AZURE_TENANT_ID }}
+  AZURE_CLIENT_ID: ${{ inputs.client-id || vars.AZURE_CLIENT_ID }}
+  AZURE_SUBSCRIPTION_ID: ${{ inputs.subscription-id || vars.AZURE_SUBSCRIPTION_ID }}
+
+jobs:
+  login-test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Show basic GH context (useful for debugging FFC subject conditions)
+        run: |
+          echo "repository:      $GITHUB_REPOSITORY"
+          echo "ref:             $GITHUB_REF"
+          echo "ref_name:        $GITHUB_REF_NAME"
+          echo "actor:           $GITHUB_ACTOR"
+          echo "event_name:      $GITHUB_EVENT_NAME"
+
+      - name: Validate required inputs/vars exist
+        run: |
+          set -euo pipefail
+          for v in AZURE_TENANT_ID AZURE_CLIENT_ID; do
+            if [ -z "${!v:-}" ]; then
+              echo "::error::$v is empty. Provide it via workflow input or Actions Variable."
+              exit 1
+            fi
+          done
+          # Subscription is optional for login; required for most 'az' resource ops
+          echo "Tenant: $AZURE_TENANT_ID"
+          echo "Client: $AZURE_CLIENT_ID"
+          echo "Subscription: ${AZURE_SUBSCRIPTION_ID:-<none>} (optional)"
+
+      - name: Azure login via OIDC (federated credential)
+        uses: azure/login@v2
+        with:
+          tenant-id: ${{ env.AZURE_TENANT_ID }}
+          client-id: ${{ env.AZURE_CLIENT_ID }}
+          # Optional: you can omit subscription-id if you only need AAD-scoped commands
+          subscription-id: ${{ env.AZURE_SUBSCRIPTION_ID }}
+          allow-no-subscriptions: true
+
+      - name: Confirm identity and context
+        run: |
+          set -euo pipefail
+          echo "az version:"
+          az version
+          echo "Current account:"
+          az account show --output table || true
+          echo "All subscriptions (visible to this principal):"
+          az account list --output table || true
+
+      - name: Test ARM token acquisition (masked) and simple ARM call
+        run: |
+          set -euo pipefail
+          TOKEN="$(az account get-access-token --resource https://management.azure.com --query accessToken -o tsv)"
+          echo "::add-mask::$TOKEN"
