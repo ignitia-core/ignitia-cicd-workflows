@@ -262,7 +262,7 @@ jobs:
           clean-old-releases: "true"
       - name: Bump -environment repo
         if: ${{ inputs.publish-type == 'docker' && (github.ref == 'refs/heads/master' || github.ref == 'refs/heads/main') }}
-        uses: ignitia-core/ignitia-cicd-actions/push-environment@v1
+        uses: ignitia-core/ignitia-cicd-actions/push-environment@master
         with:
           application: ${{ inputs.application }}
           version: ${{ steps.semver.outputs.semantic-version }}
