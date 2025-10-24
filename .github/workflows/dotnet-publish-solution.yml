@@ -75,7 +75,6 @@ on:
 
 jobs:
   dotnet-publish-solution:
-    name: Publish .NET solution
     runs-on: ubuntu-latest
     continue-on-error: false
     steps:
