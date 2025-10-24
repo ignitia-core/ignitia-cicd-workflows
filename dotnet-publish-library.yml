@@ -1,0 +1,206 @@
+# This reusable workflow standardizes library publishing across all Ignitia repos.
+# Assumes:
+# - .NET solution lives under Source/
+# - nuget.config defines all feeds (and consumes env vars for credentials if needed)
+# - Key Vault or repo secrets provide required credentials (fetch before restore if private feeds)
+# - Package source is passed explicitly (no default to public)
+# - All projects have <RestorePackagesWithLockFile>true</RestorePackagesWithLockFile> (or via Directory.Build.props)
+
+name: dotnet-publish-library
+
+permissions:
+  contents: write
+
+concurrency:
+  group: publish-${{ replace(inputs.repository, '/', '-') }}-${{ replace(github.ref_name, '/', '-') }}
+  cancel-in-progress: false
+
+on:
+  workflow_call:
+    inputs:
+      application:
+        type: string
+        required: true
+        description: "The name of the application to publish (the name without the api/contract/ui postfix)."
+      dotnet-version:
+        type: string
+        description: ".NET version"
+        required: false
+        default: "9.x"
+      package-path:
+        type: string
+        description: "Path to the folder that's the starting point for detecting .csproj files to package"
+        default: "Source/Assemblies"
+      package-source:
+        type: string
+        description: "NuGet package source name (that corresponds with nuget.config)"
+        required: true
+      replacements-in:
+        type: string
+        description: "Placeholder keys (tilde-separated ~)"
+        required: false
+        default: ""
+      repository:
+        type: string
+        description: "Repository name in the format 'org/repo'"
+        required: true
+    secrets:
+      github-pat:
+        description: "A GitHub Personal Access Token (PAT) with repo access to checkout the target repository."
+        required: true
+      replacements-out:
+        description: "Placeholder values (tilde-separated ~)"
+        required: false
+
+jobs:
+  dotnet-publish-library:
+    runs-on: ubuntu-latest
+    continue-on-error: false
+    steps:
+      - name: Checkout target repository
+        uses: actions/checkout@v5
+        with:
+          repository: ${{ inputs.repository }}
+          token: ${{ secrets.github-pat }}
+          path: workflow/repository
+          fetch-depth: 0
+
+      - name: Validate repository structure & presence of solution
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -d workflow/repository/Source || { echo "❌ Missing 'Source' directory at repo root."; exit 1; }
+          ls workflow/repository/Source/*.sln >/dev/null 2>&1 || { echo "❌ No .sln in Source/"; exit 1; }
+
+      - name: Validate RestorePackagesWithLockFile in all .csproj files
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "🔍 Validating RestorePackagesWithLockFile..."
+          INVALID_PROJECTS=()
+          GLOBAL_ENABLED=false
+          if [ -f "workflow/repository/Source/Directory.Build.props" ] && \
+             grep -q '<RestorePackagesWithLockFile>true</RestorePackagesWithLockFile>' "workflow/repository/Source/Directory.Build.props"; then
+            echo "✅ Found global RestorePackagesWithLockFile=true in Directory.Build.props"
+            GLOBAL_ENABLED=true
+          fi
+          if [ "$GLOBAL_ENABLED" = false ]; then
+            while IFS= read -r csproj; do
+              if ! grep -Pzo '(?s)<PropertyGroup[^>]*>.*?<RestorePackagesWithLockFile>\s*true\s*</RestorePackagesWithLockFile>.*?</PropertyGroup>' "$csproj" >/dev/null 2>&1; then
+                INVALID_PROJECTS+=("$csproj")
+              fi
+            done < <(find workflow/repository/Source -name "*.csproj")
+            if [ ${#INVALID_PROJECTS[@]} -ne 0 ]; then
+              echo "❌ Missing <RestorePackagesWithLockFile>true</RestorePackagesWithLockFile> in:"
+              printf '  %s\n' "${INVALID_PROJECTS[@]}"
+              exit 1
+            fi
+          fi
+          echo "✅ All projects enable RestorePackagesWithLockFile"
+
+      - name: Setup .NET SDK for provided version
+        uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: ${{ inputs.dotnet-version }}
+
+      # OPTIONAL: fetch feed credentials via OIDC + Key Vault before restore if you use private feeds
+      # - uses: ./.github/actions/azure-oidc-secrets
+      #   with:
+      #     keyvault-name: ${{ vars.KEYVAULT_NAME }}
+      #     secrets: |
+      #       AZURE_FEED_TOKEN
+      #       NUGET_API_KEY
+
+      - name: Cache NuGet packages
+        id: cache-nuget
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.nuget/packages
+            ~/.local/share/NuGet/v3-cache
+          key: ${{ runner.os }}-nuget-${{ hashFiles('workflow/repository/**/packages.lock.json') }}
+          restore-keys: |
+            ${{ runner.os }}-nuget-
+
+      - name: Log cache status
+        shell: bash
+        run: |
+          if [ "${{ steps.cache-nuget.outputs.cache-hit }}" = "true" ]; then
+            echo "✅ NuGet cache hit"
+          else
+            echo "ℹ️ NuGet cache miss"
+          fi
+
+      - name: Replace placeholders
+        uses: ignitia-core/ignitia-cicd-actions/common-replace-placeholders@master
+        with:
+          directory: workflow/repository
+          replacements-in: ${{ inputs.replacements-in }}
+          replacements-out: ${{ secrets.replacements-out }}
+
+      - name: dotnet restore (locked)
+        run: dotnet restore workflow/repository/Source/*.sln --locked-mode
+
+      - name: dotnet build (Release)
+        run: dotnet build workflow/repository/Source/*.sln -c Release --no-restore
+
+      - name: dotnet test (trx)
+        run: dotnet test workflow/repository/Source/*.sln -c Release --no-build --logger "trx;LogFileName=TestResults.trx"
+
+      - name: Ensure tests executed
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          total=$(grep -hoP 'total=\"\K\d+' **/TestResults.trx 2>/dev/null | awk '{s+=$1} END{print s+0}')
+          if [ "${total:-0}" -eq 0 ]; then
+            echo "❌ No tests executed"; exit 1
+          fi
+          echo "✅ Total tests executed: $total"
+
+      - name: Upload test results as artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: tests-${{ github.run_id }}
+          if-no-files-found: ignore
+          path: |
+            **/TestResults.trx
+            **/TestResult.xml
+            **/coverage.*
+
+      - name: Generate Semantic Version with GitVersion
+        id: semver
+        uses: ignitia-core/ignitia-cicd-actions/gitversion-generate-semver@master
+
+      - name: Publish .NET library
+        uses: ignitia-core/ignitia-cicd-actions/dotnet-publish-nuget-packages@master
+        with:
+          package-path: workflow/repository/${{ inputs.package-path }}
+          package-source: ${{ inputs.package-source }}
+          package-version: ${{ steps.semver.outputs.semantic-version }}
+
+      - name: Tag target repo (annotated, idempotent)
+        if: github.ref == 'refs/heads/master'
+        shell: bash
+        env:
+          GIT_AUTHOR_NAME: ci
+          GIT_AUTHOR_EMAIL: ci@ignitia
+        run: |
+          set -euo pipefail
+          cd workflow/repository
+          git config user.name "$GIT_AUTHOR_NAME"
+          git config user.email "$GIT_AUTHOR_EMAIL"
+          tag="${{ steps.semver.outputs.semantic-version }}"
+          git tag -a "$tag" -m "Release $tag" -f
+          git push "https://x-access-token:${{ secrets.github-pat }}@github.com/${{ inputs.repository }}" +refs/tags/$tag
+
+      - name: Cleanup Old Releases & Tags
+        if: github.ref == 'refs/heads/master'
+        uses: ignitia-core/ignitia-cicd-actions/github-clean-releases@master
+        with:
+          keep: 10
+          token: ${{ secrets.github-pat }}
+          semantic-version: ${{ steps.semver.outputs.semantic-version }}
+          clean-prereleases: "true"
+          clean-old-releases: "true"
