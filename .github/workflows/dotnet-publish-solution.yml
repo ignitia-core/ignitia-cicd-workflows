@@ -71,6 +71,11 @@ on:
         required: false
         default: ""
         description: "Key Vault secret name for AWS secret access key (docker only)"
+      keyvault-nuget-api-key:
+        type: string
+        required: false
+        default: ""
+        description: "Key Vault secret name for NuGet API key (nuget publish-type only, typically same as the Azure Artifacts feed password)"
       secret-placeholders:
         type: string
         required: false
@@ -162,6 +167,21 @@ jobs:
           # Join with tilde separator
           printf 'values=%s\n' "$(IFS='~'; echo "${VALUES[*]}")" >> "$GITHUB_OUTPUT"
           echo "✓ Fetched ${#KEYS[@]} placeholder secret(s)"
+
+      - name: Fetch NuGet API key (if specified for nuget publish-type)
+        id: nuget-api-key
+        if: inputs.publish-type == 'nuget' && inputs.keyvault-nuget-api-key != ''
+        shell: bash
+        run: |
+          set -euo pipefail
+          API_KEY="$(az keyvault secret show --vault-name "${{ inputs.keyvault-name }}" --name "${{ inputs.keyvault-nuget-api-key }}" --query value -o tsv)"
+          if [ -z "$API_KEY" ]; then 
+            echo "❌ Missing NuGet API key secret in Key Vault: ${{ inputs.keyvault-nuget-api-key }}"
+            exit 1
+          fi
+          echo "::add-mask::$API_KEY"
+          echo "api-key=$API_KEY" >> "$GITHUB_OUTPUT"
+          echo "✓ Fetched NuGet API key from Key Vault"
 
       # -------------------- Checkout & Validation --------------------
       - name: Checkout target repository
@@ -315,6 +335,7 @@ jobs:
         if: inputs.publish-type == 'nuget'
         uses: ignitia-core/ignitia-cicd-actions/dotnet-publish-nuget-packages@master
         with:
+          nuget-api-key: ${{ steps.nuget-api-key.outputs.api-key }}
           package-path: workflow/repository/${{ inputs.package-path }}
           package-source: ${{ inputs.package-source }}
           package-version: ${{ steps.semver.outputs.semantic-version }}
