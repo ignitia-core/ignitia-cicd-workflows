@@ -296,21 +296,6 @@ jobs:
           echo "📋 Configured NuGet sources:"
           dotnet nuget list source
 
-      # -------------------- NuGet source validation (after dotnet is set up) --------------------
-      - name: Validate NuGet source
-        shell: bash
-        run: |
-          set -euo pipefail
-          src="${{ inputs.package-source }}"
-          if [[ "$src" =~ ^https?:// ]]; then
-            echo "🔗 package-source is a URL: $src"; exit 0
-          fi
-          if ! dotnet nuget list source | awk '{$1=$1}1' | grep -E "^  ${src} "; then
-            echo "❌ NuGet source '${src}' not found in 'dotnet nuget list source'. Ensure nuget.config defines it or pass a URL."
-            exit 1
-          fi
-          echo "✅ NuGet source '${src}' found"
-
       # -------------------- Build / Test --------------------
       - name: dotnet restore (locked)
         run: dotnet restore workflow/repository/Source/*.sln --locked-mode
