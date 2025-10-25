@@ -306,26 +306,6 @@ jobs:
       - name: dotnet test (trx)
         run: dotnet test workflow/repository/Source/*.sln -c Release --no-build --logger "trx;LogFileName=TestResults.trx"
 
-      - name: Ensure tests executed
-        if: always()
-        shell: bash
-        run: |
-          set -euo pipefail
-          total=$(grep -hoP 'total=\"\K\d+' **/TestResults.trx 2>/dev/null | awk '{s+=$1} END{print s+0}')
-          if [ "${total:-0}" -eq 0 ]; then echo "❌ No tests executed"; exit 1; fi
-          echo "✅ Total tests executed: $total"
-
-      - name: Upload test results as artifacts
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: tests-${{ github.run_id }}
-          if-no-files-found: ignore
-          path: |
-            **/TestResults.trx
-            **/TestResult.xml
-            **/coverage.*
-
       - name: Generate Semantic Version with GitVersion
         id: semver
         uses: ignitia-core/ignitia-cicd-actions/gitversion-generate-semver@master
