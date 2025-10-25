@@ -266,9 +266,38 @@ jobs:
           replacements-in: ${{ steps.placeholder-keys.outputs.values }}
           replacements-out: ${{ steps.placeholders.outputs.values }}
 
+      # -------------------- NuGet Configuration --------------------
+      - name: Configure NuGet sources from repository nuget.config
+        shell: bash
+        run: |
+          set -euo pipefail
+          
+          NUGET_CONFIG="workflow/repository/nuget.config"
+          
+          # Enforce nuget.config existence
+          if [ ! -f "$NUGET_CONFIG" ]; then
+            echo "❌ Error: nuget.config not found at repository root"
+            echo "   This pipeline requires a nuget.config file to be present"
+            exit 1
+          fi
+          
+          echo "📦 Found nuget.config in repository"
+          
+          # Copy to .NET user profile location (for NuGet operations)
+          mkdir -p ~/.nuget/NuGet
+          cp "$NUGET_CONFIG" ~/.nuget/NuGet/NuGet.Config
+          echo "✅ Copied to ~/.nuget/NuGet/NuGet.Config"
+          
+          # Also copy to project directory location (alternative lookup path)
+          cp "$NUGET_CONFIG" workflow/repository/Source/nuget.config
+          echo "✅ Copied to workflow/repository/Source/nuget.config"
+          
+          echo ""
+          echo "📋 Configured NuGet sources:"
+          dotnet nuget list source
+
       # -------------------- NuGet source validation (after dotnet is set up) --------------------
       - name: Validate NuGet source
-        if: inputs.publish-type == 'nuget'
         shell: bash
         run: |
           set -euo pipefail
