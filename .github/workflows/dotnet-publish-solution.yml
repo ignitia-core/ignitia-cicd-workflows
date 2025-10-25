@@ -1,24 +1,25 @@
 # This reusable workflow standardizes dotnet solution publishing across all Ignitia repos.
-# Supports both:
-# - Libraries (publish-type: nuget): Publishes NuGet packages to Azure Artifacts or other NuGet feeds
-# - Products (publish-type: docker): Builds and publishes Docker images to AWS ECR
+# Supports:
+# - Libraries  (publish-type: nuget): publish NuGet packages to a specified source
+# - Products   (publish-type: docker): build & publish Docker images to AWS ECR
+#
 # Assumes:
 # - .NET solution lives under Source/
-# - For NuGet: nuget.config defines all feeds (and consumes env vars for credentials if needed)
-# - For Docker: Dockerfile exists at repository root
-# - Key Vault or repo secrets provide required credentials (fetch before restore if private feeds)
+# - For NuGet: nuget.config defines feeds (can consume env vars for creds)
+# - For Docker: Dockerfile exists where your docker composite expects it
 # - For NuGet: Package source is passed explicitly (no default to public)
-# - For NuGet: All projects have <RestorePackagesWithLockFile>true</RestorePackagesWithLockFile> (or via Directory.Build.props)
-# - For Products (docker): Automatically pushes to -environment repo when running on master branch
+# - All projects enable <RestorePackagesWithLockFile>true</RestorePackagesWithLockFile> (or Directory.Build.props)
+# - For Docker: on main/master also bumps the -environment repo
 
 name: dotnet-publish-solution
 
 permissions:
   contents: write
   pull-requests: write
+  id-token: write   # required for azure/login OIDC
 
 concurrency:
-  group: publish-${{ github.repository }}-${{ github.ref }}
+  group: publish-${{ replace(github.repository, '/', '-') }}-${{ replace(github.ref, '/', '-') }}
   cancel-in-progress: false
 
 on:
@@ -27,146 +28,201 @@ on:
       application:
         type: string
         required: true
-        description: "The name of the application to publish (the name without the api/contract/ui postfix)."
+        description: "Base app name (without api/contract/ui postfix)."
       dotnet-version:
         type: string
-        description: ".NET version"
         required: false
         default: "9.x"
+        description: ".NET SDK version"
       publish-type:
         type: string
-        description: "Publish type: 'nuget' for libraries or 'docker' for products"
         required: true
+        description: "'nuget' for libraries or 'docker' for products"
       package-path:
         type: string
-        description: "Path to the folder that's the starting point for detecting .csproj files to package (for nuget only)"
+        required: false
         default: "Source/Assemblies"
+        description: "Root folder to discover .csproj for packing (nuget only)"
       package-source:
         type: string
-        description: "NuGet package source name (that corresponds with nuget.config) - required for nuget publish-type"
         required: false
+        description: "NuGet source key/URL (required when publish-type='nuget')"
       aws-region:
         type: string
-        description: "AWS region for ECR (for docker only)"
         required: false
         default: "eu-west-1"
-      replacements-in:
+        description: "AWS region for ECR (docker only)"
+      keyvault-name:
         type: string
-        description: "Placeholder keys (tilde-separated ~)"
+        required: true
+        description: "Azure Key Vault name to fetch secrets from"
+      keyvault-github-pat-key:
+        type: string
+        required: false
+        default: "IGNITIA-GITHUB-PAT"
+        description: "Key Vault secret name for GitHub PAT"
+      keyvault-aws-access-key-id-key:
+        type: string
         required: false
         default: ""
+        description: "Key Vault secret name for AWS access key ID (docker only)"
+      keyvault-aws-secret-access-key-key:
+        type: string
+        required: false
+        default: ""
+        description: "Key Vault secret name for AWS secret access key (docker only)"
+      secret-placeholders:
+        type: string
+        required: false
+        default: ""
+        description: "Tilde-separated Key Vault secret names to fetch and use as {{KEY}} placeholders in files, e.g. 'IGNITIA-AZURE-ARTIFACTS-SECRET'"
       repository:
         type: string
-        description: "Repository name in the format 'org/repo'"
         required: true
-    secrets:
-      github-pat:
-        description: "A GitHub Personal Access Token (PAT) with repo access to checkout the target repository."
-        required: true
-      replacements-out:
-        description: "Placeholder values (tilde-separated ~)"
-        required: false
-      aws-access-key-id:
-        description: "AWS access key ID (required for docker publish-type)"
-        required: false
-      aws-secret-access-key:
-        description: "AWS secret access key (required for docker publish-type)"
-        required: false
+        description: "Target repo (org/repo) to publish from"
+    secrets: {}
 
 jobs:
   dotnet-publish-solution:
     runs-on: ubuntu-latest
     continue-on-error: false
     steps:
+      # -------------------- Azure OIDC + Key Vault secrets --------------------
+      - name: Load Azure config
+        id: azure_config
+        shell: bash
+        run: |
+          set -euo pipefail
+          CONFIG="$(curl -fsSL https://raw.githubusercontent.com/ignitia-core/ignitia-cicd-configuration/master/configuration.json)"
+          TENANT_ID="$(jq -r .tenantId <<< "$CONFIG")"
+          SUBSCRIPTION_ID="$(jq -r .subscriptionId <<< "$CONFIG")"
+          CLIENT_ID="$(jq -r '.clients["github-oidc"].clientId' <<< "$CONFIG")"
+          {
+            echo "tenant-id=$TENANT_ID"
+            echo "subscription-id=$SUBSCRIPTION_ID"
+            echo "client-id=$CLIENT_ID"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Azure login via OIDC
+        uses: azure/login@v2
+        with:
+          tenant-id: ${{ steps.azure_config.outputs.tenant-id }}
+          client-id: ${{ steps.azure_config.outputs.client-id }}
+          subscription-id: ${{ steps.azure_config.outputs.subscription-id }}
+          allow-no-subscriptions: true
+
+      - name: Fetch GitHub PAT from Key Vault
+        id: github-pat
+        shell: bash
+        run: |
+          set -euo pipefail
+          PAT="$(az keyvault secret show --vault-name "${{ inputs.keyvault-name }}" --name "${{ inputs.keyvault-github-pat-key }}" --query value -o tsv)"
+          if [ -z "$PAT" ]; then echo "❌ Missing GitHub PAT in Key Vault"; exit 1; fi
+          echo "::add-mask::$PAT"
+          echo "value=$PAT" >> "$GITHUB_OUTPUT"
+
+      - name: Fetch AWS credentials from Key Vault (docker only)
+        id: aws-creds
+        if: inputs.publish-type == 'docker'
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -z "${{ inputs.keyvault-aws-access-key-id-key }}" ] || [ -z "${{ inputs.keyvault-aws-secret-access-key-key }}" ]; then
+            echo "❌ keyvault-aws-access-key-id-key and keyvault-aws-secret-access-key-key are required for publish-type=docker"
+            exit 1
+          fi
+          
+          ACCESS_KEY_ID="$(az keyvault secret show --vault-name "${{ inputs.keyvault-name }}" --name "${{ inputs.keyvault-aws-access-key-id-key }}" --query value -o tsv)"
+          SECRET_ACCESS_KEY="$(az keyvault secret show --vault-name "${{ inputs.keyvault-name }}" --name "${{ inputs.keyvault-aws-secret-access-key-key }}" --query value -o tsv)"
+          
+          if [ -z "$ACCESS_KEY_ID" ] || [ -z "$SECRET_ACCESS_KEY" ]; then
+            echo "❌ Missing AWS credentials in Key Vault"
+            exit 1
+          fi
+          
+          echo "::add-mask::$ACCESS_KEY_ID"
+          echo "::add-mask::$SECRET_ACCESS_KEY"
+          echo "access-key-id=$ACCESS_KEY_ID" >> "$GITHUB_OUTPUT"
+          echo "secret-access-key=$SECRET_ACCESS_KEY" >> "$GITHUB_OUTPUT"
+
+      - name: Fetch additional secrets for placeholders (if specified)
+        id: placeholders
+        if: inputs.secret-placeholders != ''
+        shell: bash
+        run: |
+          set -euo pipefail
+          IFS='~' read -r -a KEYS <<< "${{ inputs.secret-placeholders }}"
+          VALUES=()
+          for key in "${KEYS[@]}"; do
+            value="$(az keyvault secret show --vault-name "${{ inputs.keyvault-name }}" --name "$key" --query value -o tsv)"
+            if [ -z "$value" ]; then echo "❌ Missing secret in Key Vault: $key"; exit 1; fi
+            echo "::add-mask::$value"
+            VALUES+=("$value")
+          done
+          # Join with tilde separator
+          printf 'values=%s\n' "$(IFS='~'; echo "${VALUES[*]}")" >> "$GITHUB_OUTPUT"
+          echo "✓ Fetched ${#KEYS[@]} placeholder secret(s)"
+
+      # -------------------- Checkout & Validation --------------------
       - name: Checkout target repository
         uses: actions/checkout@v5
         with:
           repository: ${{ inputs.repository }}
-          token: ${{ secrets.github-pat }}
+          token: ${{ steps.github-pat.outputs.value }}
           path: workflow/repository
           fetch-depth: 0
+
       - name: Validate repository structure & presence of solution
         shell: bash
         run: |
           set -euo pipefail
           test -d workflow/repository/Source || { echo "❌ Missing 'Source' directory at repo root."; exit 1; }
           ls workflow/repository/Source/*.sln >/dev/null 2>&1 || { echo "❌ No .sln in Source/"; exit 1; }
+
       - name: Validate publish-type input
         shell: bash
         run: |
           set -euo pipefail
-          if [ "${{ inputs.publish-type }}" != "nuget" ] && [ "${{ inputs.publish-type }}" != "docker" ]; then
-            echo "❌ Invalid publish-type: ${{ inputs.publish-type }}. Must be 'nuget' or 'docker'."
-            exit 1
-          fi
-          if [ "${{ inputs.publish-type }}" == "nuget" ] && [ -z "${{ inputs.package-source }}" ]; then
-            echo "❌ package-source is required when publish-type is 'nuget'"
-            exit 1
-          fi
-          if [ "${{ inputs.publish-type }}" == "docker" ]; then
-            if [ -z "${{ secrets.aws-access-key-id }}" ] || [ -z "${{ secrets.aws-secret-access-key }}" ]; then
-              echo "❌ aws-access-key-id and aws-secret-access-key secrets are required when publish-type is 'docker'"
-              exit 1
-            fi
-          fi
-          echo "✅ Publish type validation passed: ${{ inputs.publish-type }}"
-      # Ensure package-path exists (nuget only)
-      - name: Validate package-path
-        if: inputs.publish-type == 'nuget'
-        shell: bash
-        run: |
-          set -euo pipefail
-          test -d "workflow/repository/${{ inputs.package-path }}" \
-            || { echo "❌ package-path not found: workflow/repository/${{ inputs.package-path }}"; exit 1; }
+          case "${{ inputs.publish-type }}" in
+            nuget) 
+              [ -n "${{ inputs.package-source }}" ] || { echo "❌ package-source is required for publish-type=nuget"; exit 1; }
+              ;;
+            docker)
+              [ -n "${{ inputs.keyvault-aws-access-key-id-key }}" ] && [ -n "${{ inputs.keyvault-aws-secret-access-key-key }}" ] \
+                || { echo "❌ keyvault-aws-access-key-id-key and keyvault-aws-secret-access-key-key are required for publish-type=docker"; exit 1; }
+              ;;
+            *) echo "❌ Invalid publish-type: ${{ inputs.publish-type }}"; exit 1 ;;
+          esac
+          echo "✅ Publish type: ${{ inputs.publish-type }}"
 
-      # Ensure package-source is resolvable (nuget only)
-      - name: Validate NuGet source
-        if: inputs.publish-type == 'nuget'
-        shell: bash
-        run: |
-          set -euo pipefail
-          src="${{ inputs.package-source }}"
-          if [[ "$src" =~ ^https?:// ]]; then
-            echo "🔗 package-source is a URL: $src"
-            exit 0
-          fi
-          # Check by key in nuget sources (requires nuget.config in repo or user profile)
-          if ! dotnet nuget list source | awk '{$1=$1}1' | grep -E "^  ${src} "; then
-            echo "❌ NuGet source '${src}' not found in 'dotnet nuget list source'. Ensure nuget.config defines it or pass a URL."
-            exit 1
-          fi
-          echo "✅ NuGet source '${src}' found"
-
+      # NuGet-only: enforce lockfile policy you stated is org-wide
       - name: Validate RestorePackagesWithLockFile in all .csproj files
         if: inputs.publish-type == 'nuget'
         shell: bash
         run: |
           set -euo pipefail
           echo "🔍 Validating RestorePackagesWithLockFile..."
-          INVALID_PROJECTS=()
-          GLOBAL_ENABLED=false
+          INVALID=()
+          GLOBAL=false
           if [ -f "workflow/repository/Source/Directory.Build.props" ] && \
-             grep -q '<RestorePackagesWithLockFile>true</RestorePackagesWithLockFile>' "workflow/repository/Source/Directory.Build.props"; then
-            echo "✅ Found global RestorePackagesWithLockFile=true in Directory.Build.props"
-            GLOBAL_ENABLED=true
+             grep -q '<RestorePackagesWithLockFile>true</RestorePackagesWithLockFile>' workflow/repository/Source/Directory.Build.props; then
+            GLOBAL=true
           fi
-          if [ "$GLOBAL_ENABLED" = false ]; then
+          if [ "$GLOBAL" = false ]; then
             while IFS= read -r csproj; do
-              if ! grep -Pzo '(?s)<PropertyGroup[^>]*>.*?<RestorePackagesWithLockFile>\s*true\s*</RestorePackagesWithLockFile>.*?</PropertyGroup>' "$csproj" >/dev/null 2>&1; then
-                INVALID_PROJECTS+=("$csproj")
-              fi
+              grep -Pzo '(?s)<PropertyGroup[^>]*>.*?<RestorePackagesWithLockFile>\s*true\s*</RestorePackagesWithLockFile>.*?</PropertyGroup>' "$csproj" >/dev/null 2>&1 || INVALID+=("$csproj")
             done < <(find workflow/repository/Source -name "*.csproj")
-            if [ ${#INVALID_PROJECTS[@]} -ne 0 ]; then
-              echo "❌ Missing <RestorePackagesWithLockFile>true</RestorePackagesWithLockFile> in:"
-              printf '  %s\n' "${INVALID_PROJECTS[@]}"
-              exit 1
+            if [ ${#INVALID[@]} -ne 0 ]; then
+              echo "❌ Missing <RestorePackagesWithLockFile>true</RestorePackagesWithLockFile> in:"; printf '  %s\n' "${INVALID[@]}"; exit 1
             fi
           fi
-          echo "✅ All projects enable RestorePackagesWithLockFile"
-      - name: Setup .NET SDK for provided version
+          echo "✅ Lockfile policy satisfied"
+
+      - name: Setup .NET SDK
         uses: actions/setup-dotnet@v5
         with:
           dotnet-version: ${{ inputs.dotnet-version }}
+
       - name: Cache NuGet packages
         id: cache-nuget
         uses: actions/cache@v4
@@ -177,7 +233,8 @@ jobs:
           key: ${{ runner.os }}-nuget-${{ hashFiles('workflow/repository/**/packages.lock.json') }}
           restore-keys: |
             ${{ runner.os }}-nuget-
-      - name: Log cache status
+
+      - name: Log NuGet cache status
         shell: bash
         run: |
           if [ "${{ steps.cache-nuget.outputs.cache-hit }}" = "true" ]; then
@@ -185,29 +242,77 @@ jobs:
           else
             echo "ℹ️ NuGet cache miss"
           fi
-      - name: Replace placeholders
-        # This ensures that the secrets (for nuget/azure) are already in place by workflow input
+
+      # -------------------- Placeholder Replacement --------------------
+      - name: Replace placeholders using fetched secrets
+        if: inputs.secret-placeholders != ''
         uses: ignitia-core/ignitia-cicd-actions/common-replace-placeholders@master
         with:
           directory: workflow/repository
-          replacements-in: ${{ inputs.replacements-in }}
-          replacements-out: ${{ secrets.replacements-out }}
+          replacements-in: ${{ inputs.secret-placeholders }}
+          replacements-out: ${{ steps.placeholders.outputs.values }}
+
+      # -------------------- .NET Setup & Cache --------------------
+      - name: Setup .NET SDK
+        uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: ${{ inputs.dotnet-version }}
+
+      - name: Cache NuGet packages
+        id: cache-nuget
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.nuget/packages
+            ~/.local/share/NuGet/v3-cache
+          key: ${{ runner.os }}-nuget-${{ hashFiles('workflow/repository/**/packages.lock.json') }}
+          restore-keys: |
+            ${{ runner.os }}-nuget-
+
+      - name: Log NuGet cache status
+        shell: bash
+        run: |
+          if [ "${{ steps.cache-nuget.outputs.cache-hit }}" = "true" ]; then
+            echo "✅ NuGet cache hit"
+          else
+            echo "ℹ️ NuGet cache miss"
+          fi
+
+      # -------------------- NuGet source validation (after dotnet is set up) --------------------
+      - name: Validate NuGet source
+        if: inputs.publish-type == 'nuget'
+        shell: bash
+        run: |
+          set -euo pipefail
+          src="${{ inputs.package-source }}"
+          if [[ "$src" =~ ^https?:// ]]; then
+            echo "🔗 package-source is a URL: $src"; exit 0
+          fi
+          if ! dotnet nuget list source | awk '{$1=$1}1' | grep -E "^  ${src} "; then
+            echo "❌ NuGet source '${src}' not found in 'dotnet nuget list source'. Ensure nuget.config defines it or pass a URL."
+            exit 1
+          fi
+          echo "✅ NuGet source '${src}' found"
+
+      # -------------------- Build / Test --------------------
       - name: dotnet restore (locked)
         run: dotnet restore workflow/repository/Source/*.sln --locked-mode
+
       - name: dotnet build (Release)
         run: dotnet build workflow/repository/Source/*.sln -c Release --no-restore
+
       - name: dotnet test (trx)
         run: dotnet test workflow/repository/Source/*.sln -c Release --no-build --logger "trx;LogFileName=TestResults.trx"
+
       - name: Ensure tests executed
         if: always()
         shell: bash
         run: |
           set -euo pipefail
           total=$(grep -hoP 'total=\"\K\d+' **/TestResults.trx 2>/dev/null | awk '{s+=$1} END{print s+0}')
-          if [ "${total:-0}" -eq 0 ]; then
-            echo "❌ No tests executed"; exit 1
-          fi
+          if [ "${total:-0}" -eq 0 ]; then echo "❌ No tests executed"; exit 1; fi
           echo "✅ Total tests executed: $total"
+
       - name: Upload test results as artifacts
         if: always()
         uses: actions/upload-artifact@v4
@@ -218,9 +323,12 @@ jobs:
             **/TestResults.trx
             **/TestResult.xml
             **/coverage.*
+
       - name: Generate Semantic Version with GitVersion
         id: semver
         uses: ignitia-core/ignitia-cicd-actions/gitversion-generate-semver@master
+
+      # -------------------- Publish --------------------
       - name: Publish .NET library (NuGet)
         if: inputs.publish-type == 'nuget'
         uses: ignitia-core/ignitia-cicd-actions/dotnet-publish-nuget-packages@master
@@ -228,15 +336,18 @@ jobs:
           package-path: workflow/repository/${{ inputs.package-path }}
           package-source: ${{ inputs.package-source }}
           package-version: ${{ steps.semver.outputs.semantic-version }}
+
       - name: Publish product (Docker to ECR)
         if: inputs.publish-type == 'docker'
         uses: ignitia-core/ignitia-cicd-actions/aws-publish-docker-image@master
         with:
           software-version: ${{ steps.semver.outputs.semantic-version }}
-          aws-access-key-id: ${{ secrets.aws-access-key-id }}
-          aws-secret-access-key: ${{ secrets.aws-secret-access-key }}
+          aws-access-key-id: ${{ steps.aws-creds.outputs.access-key-id }}
+          aws-secret-access-key: ${{ steps.aws-creds.outputs.secret-access-key }}
           aws-region: ${{ inputs.aws-region }}
           dotnet-version: ${{ inputs.dotnet-version }}
+
+      # -------------------- Post-publish: tag/cleanup/env bump --------------------
       - name: Tag target repo (annotated, idempotent)
         if: github.ref == 'refs/heads/master' || github.ref == 'refs/heads/main'
         shell: bash
@@ -250,21 +361,23 @@ jobs:
           git config user.email "$GIT_AUTHOR_EMAIL"
           tag="${{ steps.semver.outputs.semantic-version }}"
           git tag -a "$tag" -m "Release $tag" -f
-          git push "https://x-access-token:${{ secrets.github-pat }}@github.com/${{ inputs.repository }}" +refs/tags/$tag
+          git push "https://x-access-token:${{ steps.github-pat.outputs.value }}@github.com/${{ inputs.repository }}" +refs/tags/$tag
+
       - name: Cleanup Old Releases & Tags
         if: github.ref == 'refs/heads/master' || github.ref == 'refs/heads/main'
         uses: ignitia-core/ignitia-cicd-actions/github-clean-releases@master
         with:
           keep: 10
-          token: ${{ secrets.github-pat }}
+          token: ${{ steps.github-pat.outputs.value }}
           semantic-version: ${{ steps.semver.outputs.semantic-version }}
           clean-prereleases: "true"
           clean-old-releases: "true"
+
       - name: Bump -environment repo
-        if: ${{ inputs.publish-type == 'docker' && (github.ref == 'refs/heads/master' || github.ref == 'refs/heads/main') }}
+        if: inputs.publish-type == 'docker' && (github.ref == 'refs/heads/master' || github.ref == 'refs/heads/main')
         uses: ignitia-core/ignitia-cicd-actions/push-environment@master
         with:
           application: ${{ inputs.application }}
           version: ${{ steps.semver.outputs.semantic-version }}
         env:
-          GH_TOKEN: ${{ secrets.github-pat }}
+          GH_TOKEN: ${{ steps.github-pat.outputs.value }}
