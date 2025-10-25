@@ -244,12 +244,26 @@ jobs:
           fi
 
       # -------------------- Placeholder Replacement --------------------
+      - name: Prepare placeholder keys with {{}} wrapper
+        id: placeholder-keys
+        if: inputs.secret-placeholders != ''
+        shell: bash
+        run: |
+          set -euo pipefail
+          IFS='~' read -r -a KEYS <<< "${{ inputs.secret-placeholders }}"
+          WRAPPED=()
+          for key in "${KEYS[@]}"; do
+            WRAPPED+=("{{${key}}}")
+          done
+          # Join with tilde separator
+          printf 'values=%s\n' "$(IFS='~'; echo "${WRAPPED[*]}")" >> "$GITHUB_OUTPUT"
+      
       - name: Replace placeholders using fetched secrets
         if: inputs.secret-placeholders != ''
         uses: ignitia-core/ignitia-cicd-actions/common-replace-placeholders@master
         with:
           directory: workflow/repository
-          replacements-in: ${{ inputs.secret-placeholders }}
+          replacements-in: ${{ steps.placeholder-keys.outputs.values }}
           replacements-out: ${{ steps.placeholders.outputs.values }}
 
       # -------------------- NuGet source validation (after dotnet is set up) --------------------
