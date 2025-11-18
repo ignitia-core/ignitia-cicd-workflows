@@ -32,7 +32,7 @@ on:
       dotnet-version:
         type: string
         required: false
-        default: "9.x"
+        default: "10.x"
         description: ".NET SDK version"
       publish-type:
         type: string
@@ -350,21 +350,39 @@ jobs:
           aws-region: ${{ inputs.aws-region }}
           dotnet-version: ${{ inputs.dotnet-version }}
 
-      # -------------------- Post-publish: tag/cleanup/env bump --------------------
-      - name: Tag target repo (annotated, idempotent)
+      # -------------------- Post-publish: tag/release/cleanup/env bump --------------------
+      - name: Create Tag & GitHub Release
         if: github.ref == 'refs/heads/master' || github.ref == 'refs/heads/main'
         shell: bash
         env:
+          GH_TOKEN: ${{ steps.github-pat.outputs.value }}
           GIT_AUTHOR_NAME: ci
           GIT_AUTHOR_EMAIL: ci@ignitia
         run: |
           set -euo pipefail
           cd workflow/repository
+          
+          # Configure git
           git config user.name "$GIT_AUTHOR_NAME"
           git config user.email "$GIT_AUTHOR_EMAIL"
+          
           tag="${{ steps.semver.outputs.semantic-version }}"
+          
+          # Create annotated tag (idempotent with -f)
           git tag -a "$tag" -m "Release $tag" -f
-          git push "https://x-access-token:${{ steps.github-pat.outputs.value }}@github.com/${{ inputs.repository }}" +refs/tags/$tag
+          git push "https://x-access-token:$GH_TOKEN@github.com/${{ inputs.repository }}" "+refs/tags/$tag"
+          
+          # Create GitHub Release (idempotent via gh CLI)
+          if gh release view "$tag" --repo "${{ inputs.repository }}" >/dev/null 2>&1; then
+            echo "ℹ️ Release $tag already exists"
+          else
+            gh release create "$tag" \
+              --repo "${{ inputs.repository }}" \
+              --title "Release $tag" \
+              --notes "Automated release from CI pipeline" \
+              --verify-tag
+            echo "✅ Created release $tag"
+          fi
 
       - name: Cleanup Old Releases & Tags
         if: github.ref == 'refs/heads/master' || github.ref == 'refs/heads/main'

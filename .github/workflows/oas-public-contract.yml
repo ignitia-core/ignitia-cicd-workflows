@@ -1,0 +1,14 @@
+name: oas-publish-contract
+
+permissions:
+  contents: write
+  pull-requests: write
+  id-token: write   # required for azure/login OIDC
+
+concurrency:
+  group: publish-${{ github.repository }}-${{ github.ref }}
+  cancel-in-progress: false
+
+# TODO: This workflow probably needs to be updated based on how we refactor the client generator.
+on:
+  workflow_call:
