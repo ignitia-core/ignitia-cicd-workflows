@@ -1,0 +1,257 @@
+name: oas-publish-clients
+
+permissions:
+  contents: write
+  pull-requests: write
+  id-token: write
+
+concurrency:
+  group: publish-${{ github.repository }}-${{ github.ref }}
+  cancel-in-progress: false
+
+on:
+  workflow_call:
+    inputs:
+      aws-codeartifact-domain:
+        type: string
+        required: false
+        default: "ignitia"
+        description: "CodeArtifact domain name"
+      aws-region:
+        type: string
+        required: false
+        default: "eu-west-1"
+        description: "AWS region"
+      aws-role-arn:
+        type: string
+        required: true
+        description: "IAM role ARN for GitHub OIDC"
+      namespace:
+        description: 'The namespace of the application (ex. Ignitia)'
+        required: true
+        type: string
+      dotnet-version:
+        description: 'The .NET version to use'
+        required: false
+        type: string
+        default: "10.x"
+      node-version:
+        description: 'The Node.js version to use'
+        required: false
+        type: string
+        default: "20"
+      oas-file-path:
+        type: string
+        description: Path to the OpenAPI specification file
+        required: false
+        default: "src/oas.yaml"
+      publish-source:
+        type: string
+        required: true
+        description: "CodeArtifact repository to publish generated clients to (e.g., ignitia-internal or ignitia-platform)"
+      spectral-ruleset:
+        type: string
+        description: URL to the Spectral ruleset to use for validation
+        required: false
+        default: "https://raw.githubusercontent.com/ignitia-core/ignitia-tools-validators-spectral/refs/heads/master/spectral-ruleset.yaml"
+      spectral-validation:
+        type: boolean
+        description: Validate the contract against Ignitia's spectral rules?
+        default: true
+      generate-dotnet:
+        type: boolean
+        description: Generate and publish .NET client?
+        default: true
+      generate-typescript:
+        type: boolean
+        description: Generate and publish TypeScript client?
+        default: true
+
+jobs:
+  oas-publish-clients:
+    name: oas-publish-clients
+    runs-on: ubuntu-latest
+    steps:
+      # -------------------- AWS & CodeArtifact Setup --------------------
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ inputs.aws-role-arn }}
+          aws-region: ${{ inputs.aws-region }}
+
+      - name: Login to CodeArtifact for restore (ignitia-internal)
+        run: |
+          aws codeartifact login \
+            --tool dotnet \
+            --domain ${{ inputs.aws-codeartifact-domain }} \
+            --repository ignitia-internal
+          echo "✅ Logged in to ignitia-internal (NuGet restore)"
+
+      - name: Login to CodeArtifact for npm restore (ignitia-internal)
+        if: inputs.generate-typescript
+        run: |
+          aws codeartifact login \
+            --tool npm \
+            --domain ${{ inputs.aws-codeartifact-domain }} \
+            --repository ignitia-internal
+          echo "✅ Logged in to ignitia-internal (npm restore)"
+
+      - name: Get publish endpoint (NuGet)
+        id: publish-nuget
+        if: inputs.generate-dotnet
+        run: |
+          ENDPOINT=$(aws codeartifact get-repository-endpoint \
+            --domain ${{ inputs.aws-codeartifact-domain }} \
+            --repository ${{ inputs.publish-source }} \
+            --format nuget \
+            --query repositoryEndpoint \
+            --output text)
+          echo "endpoint=${ENDPOINT}v3/index.json" >> "$GITHUB_OUTPUT"
+          echo "✅ NuGet publish endpoint: ${ENDPOINT}v3/index.json"
+
+      - name: Get publish endpoint (npm)
+        id: publish-npm
+        if: inputs.generate-typescript
+        run: |
+          ENDPOINT=$(aws codeartifact get-repository-endpoint \
+            --domain ${{ inputs.aws-codeartifact-domain }} \
+            --repository ${{ inputs.publish-source }} \
+            --format npm \
+            --query repositoryEndpoint \
+            --output text)
+          echo "endpoint=${ENDPOINT}" >> "$GITHUB_OUTPUT"
+          echo "✅ npm publish endpoint: ${ENDPOINT}"
+
+      # -------------------- Checkout & Tooling --------------------
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          path: workflow/repository
+          fetch-depth: 0
+
+      - name: Setup .NET
+        if: inputs.generate-dotnet
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: ${{ inputs.dotnet-version }}
+
+      - name: Setup Node.js
+        if: inputs.generate-typescript
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ inputs.node-version }}
+
+      # -------------------- Versioning --------------------
+      - name: Determine Semantic Version
+        id: semver
+        uses: ignitia-core/ignitia-cicd-actions/gitversion-generate-semver@master
+
+      - name: Inject semantic version into OAS
+        run: |
+          sed -i "s/{{OAS_VERSION}}/${{ steps.semver.outputs.semantic-version }}/g" ./workflow/repository/${{ inputs.oas-file-path }}
+          echo "✅ Injected version ${{ steps.semver.outputs.semantic-version }}"
+
+      # -------------------- Validation --------------------
+      - name: Spectral validation
+        if: inputs.spectral-validation
+        run: |
+          npm install -g @stoplight/spectral-cli
+          spectral lint ./workflow/repository/${{ inputs.oas-file-path }} -r ${{ inputs.spectral-ruleset }}
+          echo "✅ Contract validated"
+
+      # -------------------- .NET Client --------------------
+      - name: Install .NET generator tool
+        if: inputs.generate-dotnet
+        run: |
+          dotnet tool install --global ignitia.generators.client
+          echo "✅ Installed ignitia.generators.client"
+
+      - name: Generate .NET client
+        if: inputs.generate-dotnet
+        run: |
+          generate-client dotnet \
+            -c "workflow/repository/${{ inputs.oas-file-path }}" \
+            -o "workflow/repository/Generated/DotNet/" \
+            -n "${{ inputs.namespace }}" \
+            -v "${{ steps.semver.outputs.semantic-version }}"
+          echo "✅ Generated .NET client"
+
+      - name: Build .NET client
+        if: inputs.generate-dotnet
+        run: |
+          dotnet restore workflow/repository/Generated/DotNet/Source/*.sln
+          dotnet build workflow/repository/Generated/DotNet/Source/*.sln -c Release --no-restore
+          echo "✅ Built .NET client"
+
+      - name: Pack .NET NuGet packages
+        if: inputs.generate-dotnet
+        run: |
+          set -euo pipefail
+          mkdir -p ./artifacts/nuget
+          find workflow/repository/Generated/DotNet -name "*.csproj" -print0 | \
+            xargs -0 -I {} dotnet pack {} \
+              -c Release \
+              --no-build \
+              -p:PackageVersion=${{ steps.semver.outputs.semantic-version }} \
+              -o ./artifacts/nuget
+          echo "✅ Packed $(ls -1 ./artifacts/nuget/*.nupkg 2>/dev/null | wc -l) NuGet package(s)"
+
+      - name: Push .NET packages to CodeArtifact
+        if: inputs.generate-dotnet
+        run: |
+          set -euo pipefail
+          for pkg in ./artifacts/nuget/*.nupkg; do
+            echo "📦 Pushing $(basename "$pkg") to ${{ inputs.publish-source }}..."
+            dotnet nuget push "$pkg" \
+              --source "${{ steps.publish-nuget.outputs.endpoint }}" \
+              --skip-duplicate
+          done
+          echo "✅ Published .NET packages to ${{ inputs.publish-source }}"
+
+      # -------------------- TypeScript Client --------------------
+      - name: Generate TypeScript client
+        if: inputs.generate-typescript
+        run: |
+          generate-client typescript \
+            -c "workflow/repository/${{ inputs.oas-file-path }}" \
+            -o "workflow/repository/Generated/TypeScript/" \
+            -n "${{ inputs.namespace }}" \
+            -v "${{ steps.semver.outputs.semantic-version }}"
+          echo "✅ Generated TypeScript client"
+
+      - name: Build TypeScript client
+        if: inputs.generate-typescript
+        run: |
+          cd workflow/repository/Generated/TypeScript
+          npm install
+          npm run build
+          echo "✅ Built TypeScript client"
+
+      - name: Publish TypeScript package to CodeArtifact
+        if: inputs.generate-typescript
+        run: |
+          cd workflow/repository/Generated/TypeScript
+          npm config set registry "${{ steps.publish-npm.outputs.endpoint }}"
+          npm publish
+          echo "✅ Published TypeScript package to ${{ inputs.publish-source }}"
+
+      # -------------------- Summary --------------------
+      - name: Summary
+        run: |
+          echo "## 📦 Published Clients" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Version:** ${{ steps.semver.outputs.semantic-version }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Publish Target:** ${{ inputs.publish-source }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          if [ "${{ inputs.generate-dotnet }}" = "true" ]; then
+            echo "### .NET" >> $GITHUB_STEP_SUMMARY
+            echo "- Package: \`${{ inputs.namespace }}.Client\`" >> $GITHUB_STEP_SUMMARY
+            echo "- Feed: \`${{ inputs.publish-source }}\`" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+          fi
+          if [ "${{ inputs.generate-typescript }}" = "true" ]; then
+            echo "### TypeScript" >> $GITHUB_STEP_SUMMARY
+            NAMESPACE_LOWER=$(echo "${{ inputs.namespace }}" | tr '[:upper:]' '[:lower:]')
+            echo "- Package: \`@${NAMESPACE_LOWER}/client\`" >> $GITHUB_STEP_SUMMARY
+            echo "- Feed: \`${{ inputs.publish-source }}\`" >> $GITHUB_STEP_SUMMARY
+          fi
