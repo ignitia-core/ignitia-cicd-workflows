@@ -1,0 +1,51 @@
+name: oas-publish-contract
+
+permissions:
+  contents: write
+  pull-requests: write
+  id-token: write   # required for azure/login OIDC
+
+concurrency:
+  group: publish-${{ github.repository }}-${{ github.ref }}
+  cancel-in-progress: false
+
+# TODO: This workflow probably needs to be updated based on how we refactor the client generator.
+on:
+  workflow_call:
+    inputs:
+      namespace:
+        description: 'The namespace of the application (ex. Ignitia)'
+        required: true
+        type: string
+      dotnet-version:
+        description: 'The .NET version to use'
+        required: true
+        type: string
+        default: "10.x"
+      oas-file-path:
+        type: string
+        description: Path to the OpenAPI specification file
+        required: false
+        default: "src/oas.yaml"
+      spectral-validation:
+        type: boolean
+        description: Validate the contract against Ignitia's spectral rules?
+        default: true
+      
+jobs:
+  oas-release-contract:
+    name: oas-publish-contract
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+        with:
+          path: workflow/repository
+          fetch-depth: 0
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: ${{ inputs.dotnet-version }}
+      - name: Determine Semantic Version
+        id: semver
+        uses: JayTechHQ/jaytech-actions/gitversion-generate-semver@master

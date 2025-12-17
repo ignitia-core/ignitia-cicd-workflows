@@ -1,0 +1,151 @@
+# This reusable workflow standardizes dotnet solution publishing to AWS CodeArtifact.
+# Supports:
+# - Libraries (publish-type: nuget): publish NuGet packages to CodeArtifact
+# - Products (publish-type: docker): build & publish Docker images to AWS ECR
+#
+# Assumes:
+# - .NET solution lives under Source/
+# - GitHub OIDC federation configured with AWS IAM role
+# - All projects enable <RestorePackagesWithLockFile>true</RestorePackagesWithLockFile>
+
+name: dotnet-publish-solution-to-codeartifact
+
+permissions:
+  contents: write
+  pull-requests: write
+  id-token: write
+
+concurrency:
+  group: publish-${{ github.repository }}-${{ github.ref }}
+  cancel-in-progress: false
+
+on:
+  workflow_call:
+    inputs:
+      application:
+        type: string
+        required: true
+        description: "Base app name (without api/contract/ui postfix)"
+      dotnet-version:
+        type: string
+        required: false
+        default: "10.x"
+        description: ".NET SDK version"
+      publish-type:
+        type: string
+        required: true
+        description: "'nuget' for libraries or 'docker' for products"
+      package-path:
+        type: string
+        required: false
+        default: "Source/Assemblies"
+        description: "Root folder to discover .csproj for packing (nuget only)"
+      package-source:
+        type: string
+        required: true
+        description: "CodeArtifact repository name (e.g., ignitia-internal or ignitia-platform)"
+      aws-region:
+        type: string
+        required: false
+        default: "eu-west-1"
+        description: "AWS region"
+      aws-role-arn:
+        type: string
+        required: true
+        description: "IAM role ARN for GitHub OIDC"
+      aws-codeartifact-domain:
+        type: string
+        required: false
+        default: "ignitia"
+        description: "CodeArtifact domain name"
+      aws-parameter-store-github-pat:
+        type: string
+        required: false
+        default: "/ignitia/prod/internal/github-pat"
+        description: "Parameter Store path for GitHub PAT (cross-repo operations)"
+      repository:
+        type: string
+        required: true
+        description: "Target repo (org/repo) to publish from"
+
+jobs:
+  dotnet-publish-solution:
+    runs-on: ubuntu-latest
+    continue-on-error: false
+    steps:
+      # -------------------- AWS OIDC Authentication --------------------
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ inputs.aws-role-arn }}
+          aws-region: ${{ inputs.aws-region }}
+
+      - name: Fetch GitHub PAT from Parameter Store
+        id: github-pat
+        run: |
+          set -euo pipefail
+          PAT=$(aws ssm get-parameter \
+            --name "${{ inputs.aws-parameter-store-github-pat }}" \
+            --with-decryption \
+            --query "Parameter.Value" \
+            --output text)
+          if [ -z "$PAT" ]; then
+            echo "❌ Missing GitHub PAT in Parameter Store: ${{ inputs.aws-parameter-store-github-pat }}"
+            exit 1
+          fi
+          echo "::add-mask::$PAT"
+          echo "value=$PAT" >> "$GITHUB_OUTPUT"
+          echo "✅ Fetched GitHub PAT from Parameter Store"
+
+      - name: Login to CodeArtifact
+        run: |
+          set -euo pipefail
+          aws codeartifact login \
+            --tool dotnet \
+            --domain ${{ inputs.aws-codeartifact-domain }} \
+            --repository ${{ inputs.package-source }}
+          echo "✅ Logged in to CodeArtifact: ${{ inputs.aws-codeartifact-domain }}/${{ inputs.package-source }}"
+
+      # -------------------- Checkout & Validation --------------------
+      - name: Checkout target repository
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ inputs.repository }}
+          token: ${{ steps.github-pat.outputs.value }}
+          path: workflow/repository
+          fetch-depth: 0
+
+      - name: Validate repository structure
+        run: |
+          set -euo pipefail
+          test -d workflow/repository/Source || { echo "❌ Missing 'Source' directory at repo root"; exit 1; }
+          ls workflow/repository/Source/*.sln >/dev/null 2>&1 || { echo "❌ No .sln in Source/"; exit 1; }
+          echo "✅ Repository structure valid"
+
+      - name: Validate publish-type input
+        run: |
+          set -euo pipefail
+          case "${{ inputs.publish-type }}" in
+            nuget|docker) echo "✅ Publish type: ${{ inputs.publish-type }}" ;;
+            *) echo "❌ Invalid publish-type: ${{ inputs.publish-type }}"; exit 1 ;;
+          esac
+
+      - name: Validate RestorePackagesWithLockFile
+        if: inputs.publish-type == 'nuget'
+        run: |
+          set -euo pipefail
+          echo "🔍 Validating RestorePackagesWithLockFile..."
+          GLOBAL=false
+          if [ -f "workflow/repository/Source/Directory.Build.props" ] && \
+             grep -q '<RestorePackagesWithLockFile>true</RestorePackagesWithLockFile>' workflow/repository/Source/Directory.Build.props; then
+            GLOBAL=true
+          fi
+          if [ "$GLOBAL" = false ]; then
+            INVALID=()
+            while IFS= read -r csproj; do
+              grep -Pzo '(?s)<PropertyGroup[^>]*>.*?<RestorePackagesWithLockFile>\s*true\s*</RestorePackagesWithLockFile>.*?</PropertyGroup>' "$csproj" >/dev/null 2>&1 || INVALID+=("$csproj")
+            done < <(find workflow/repository/Source -name "*.csproj")
+            if [ ${#INVALID[@]} -ne 0 ]; then
+              echo "❌ Missing <RestorePackagesWithLockFile>true</RestorePackagesWithLockFile> in:"
+              printf '  %s\n' "${INVALID[@]}"
+              exit 1
