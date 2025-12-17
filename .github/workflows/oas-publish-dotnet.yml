@@ -106,7 +106,7 @@ jobs:
           echo "📂 Generated files:"
           ls -laR workflow/repository/Generated/DotNet/
       - name: dotnet build (Release)
-        run: dotnet build workflow/repository/Generated/DotNet/*.sln -c Release --no-restore
+        run: dotnet build workflow/repository/Generated/DotNet/Source/*.sln -c Release --no-restore
       - name: Pack NuGet packages
         run: |
           set -euo pipefail
