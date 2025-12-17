@@ -94,5 +94,10 @@ jobs:
       - name: Install .NET tool
         run: |
           dotnet tool install --global ignitia.generators.client
-          # Or from your private feed specifically:
-          # dotnet tool install --global ignitia.generators.client --add-source "https://ignitia-246089461294.d.codeartifact.eu-west-1.amazonaws.com/nuget/${{ inputs.package-source }}/v3/index.json"
+      - name: Generate .NET client
+        run: |
+          ignitia.generators.client generate-client dotnet \
+            -c "${{ inputs.oas-file-path }}" \
+            -o "./Generated/DotNet/" \
+            -n "${{ inputs.namespace }}" \
+            -v "${{ steps.semver.outputs.semantic-version }}"
