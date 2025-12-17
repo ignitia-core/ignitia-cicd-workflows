@@ -71,6 +71,16 @@ jobs:
             --domain ${{ inputs.aws-codeartifact-domain }} \
             --repository ${{ inputs.package-source }}
           echo "✅ Logged in to CodeArtifact"
+      - name: Get CodeArtifact endpoint
+        id: codeartifact
+        run: |
+          ENDPOINT=$(aws codeartifact get-repository-endpoint \
+            --domain ${{ inputs.aws-codeartifact-domain }} \
+            --repository ${{ inputs.package-source }} \
+            --format nuget \
+            --query repositoryEndpoint \
+            --output text)
+          echo "endpoint=${ENDPOINT}v3/index.json" >> "$GITHUB_OUTPUT"
       - name: Checkout repository
         uses: actions/checkout@v5
         with:
@@ -126,7 +136,7 @@ jobs:
           for pkg in ./artifacts/*.nupkg; do
             echo "📦 Pushing $(basename "$pkg")..."
             dotnet nuget push "$pkg" \
-              --source "${{ inputs.package-source }}" \
+              --source "${{ steps.codeartifact.outputs.endpoint }}" \
               --skip-duplicate
           done
           echo "✅ Published all packages"
