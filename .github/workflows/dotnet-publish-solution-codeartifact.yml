@@ -79,109 +79,109 @@ jobs:
     continue-on-error: false
     steps:
       # -------------------- AWS OIDC Authentication --------------------
-    - name: Configure AWS credentials (OIDC)
-      uses: aws-actions/configure-aws-credentials@v4
-      with:
-        role-to-assume: ${{ inputs.aws-role-arn }}
-        aws-region: ${{ inputs.aws-region }}
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ inputs.aws-role-arn }}
+          aws-region: ${{ inputs.aws-region }}
 
-    - name: Fetch GitHub PAT from Parameter Store
-      id: github-pat
-      run: |
-        set -euo pipefail
-        PAT=$(aws ssm get-parameter \
-          --name "${{ inputs.aws-parameter-store-github-pat }}" \
-          --with-decryption \
-          --query "Parameter.Value" \
-          --output text)
-        if [ -z "$PAT" ]; then
-          echo "❌ Missing GitHub PAT in Parameter Store"
-          exit 1
-        fi
-        echo "::add-mask::$PAT"
-        echo "value=$PAT" >> "$GITHUB_OUTPUT"
-        echo "✅ Fetched GitHub PAT"
-
-    # -------------------- Checkout --------------------
-    - name: Checkout target repository
-      uses: actions/checkout@v4
-      with:
-        repository: ${{ inputs.repository }}
-        token: ${{ steps.github-pat.outputs.value }}
-        path: workflow/repository
-        fetch-depth: 0
-
-    # -------------------- NuGet Placeholder Replacement --------------------
-    - name: Detect and replace placeholders in nuget.config
-      run: |
-        set -euo pipefail
-        
-        NUGET_CONFIG="workflow/repository/nuget.config"
-        
-        if [ ! -f "$NUGET_CONFIG" ]; then
-          echo "ℹ️ No nuget.config found, skipping"
-          exit 0
-        fi
-        
-        PLACEHOLDERS=$(grep -oP '\{\{[A-Za-z0-9_-]+\}\}' "$NUGET_CONFIG" | sort -u || true)
-        
-        if [ -z "$PLACEHOLDERS" ]; then
-          echo "ℹ️ No placeholders in nuget.config"
-          exit 0
-        fi
-        
-        echo "🔍 Found placeholders:"
-        echo "$PLACEHOLDERS"
-        
-        while IFS= read -r placeholder; do
-          key="${placeholder#\{\{}"
-          key="${key%\}\}}"
-          
-          param_name="/ignitia/global/${key,,}"
-          param_name="${param_name//_/-}"
-          
-          echo "📦 Fetching: $param_name"
-          
-          value=$(aws ssm get-parameter \
-            --name "$param_name" \
+      - name: Fetch GitHub PAT from Parameter Store
+        id: github-pat
+        run: |
+          set -euo pipefail
+          PAT=$(aws ssm get-parameter \
+            --name "${{ inputs.aws-parameter-store-github-pat }}" \
             --with-decryption \
             --query "Parameter.Value" \
-            --output text 2>/dev/null) || {
-            echo "❌ Failed to fetch: $param_name"
+            --output text)
+          if [ -z "$PAT" ]; then
+            echo "❌ Missing GitHub PAT in Parameter Store"
             exit 1
-          }
-          
-          echo "::add-mask::$value"
-          sed -i "s|$placeholder|$value|g" "$NUGET_CONFIG"
-          echo "✅ Replaced $placeholder"
-          
-        done <<< "$PLACEHOLDERS"
+          fi
+          echo "::add-mask::$PAT"
+          echo "value=$PAT" >> "$GITHUB_OUTPUT"
+          echo "✅ Fetched GitHub PAT"
 
-    # -------------------- CodeArtifact Login (adds source if not in nuget.config) --------------------
-    - name: Login to CodeArtifact
-      run: |
-        aws codeartifact login \
-          --tool dotnet \
-          --domain ${{ inputs.aws-codeartifact-domain }} \
-          --repository ${{ inputs.package-source }}
-        echo "✅ CodeArtifact source configured"
+      # -------------------- Checkout --------------------
+      - name: Checkout target repository
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ inputs.repository }}
+          token: ${{ steps.github-pat.outputs.value }}
+          path: workflow/repository
+          fetch-depth: 0
 
-    # -------------------- Copy nuget.config to expected locations --------------------
-    - name: Configure NuGet sources
-      run: |
-        set -euo pipefail
-        
-        NUGET_CONFIG="workflow/repository/nuget.config"
-        
-        if [ -f "$NUGET_CONFIG" ]; then
-          mkdir -p ~/.nuget/NuGet
-          cp "$NUGET_CONFIG" ~/.nuget/NuGet/NuGet.Config
-          cp "$NUGET_CONFIG" workflow/repository/Source/nuget.config
-          echo "✅ Copied nuget.config to NuGet locations"
-        fi
-        
-        echo "📋 Configured sources:"
-        dotnet nuget list source
+      # -------------------- NuGet Placeholder Replacement --------------------
+      - name: Detect and replace placeholders in nuget.config
+        run: |
+          set -euo pipefail
+          
+          NUGET_CONFIG="workflow/repository/nuget.config"
+          
+          if [ ! -f "$NUGET_CONFIG" ]; then
+            echo "ℹ️ No nuget.config found, skipping"
+            exit 0
+          fi
+          
+          PLACEHOLDERS=$(grep -oP '\{\{[A-Za-z0-9_-]+\}\}' "$NUGET_CONFIG" | sort -u || true)
+          
+          if [ -z "$PLACEHOLDERS" ]; then
+            echo "ℹ️ No placeholders in nuget.config"
+            exit 0
+          fi
+          
+          echo "🔍 Found placeholders:"
+          echo "$PLACEHOLDERS"
+          
+          while IFS= read -r placeholder; do
+            key="${placeholder#\{\{}"
+            key="${key%\}\}}"
+            
+            param_name="/ignitia/global/${key,,}"
+            param_name="${param_name//_/-}"
+            
+            echo "📦 Fetching: $param_name"
+            
+            value=$(aws ssm get-parameter \
+              --name "$param_name" \
+              --with-decryption \
+              --query "Parameter.Value" \
+              --output text 2>/dev/null) || {
+              echo "❌ Failed to fetch: $param_name"
+              exit 1
+            }
+            
+            echo "::add-mask::$value"
+            sed -i "s|$placeholder|$value|g" "$NUGET_CONFIG"
+            echo "✅ Replaced $placeholder"
+            
+          done <<< "$PLACEHOLDERS"
+
+      # -------------------- CodeArtifact Login (adds source if not in nuget.config) --------------------
+      - name: Login to CodeArtifact
+        run: |
+          aws codeartifact login \
+            --tool dotnet \
+            --domain ${{ inputs.aws-codeartifact-domain }} \
+            --repository ${{ inputs.package-source }}
+          echo "✅ CodeArtifact source configured"
+
+      # -------------------- Copy nuget.config to expected locations --------------------
+      - name: Configure NuGet sources
+        run: |
+          set -euo pipefail
+          
+          NUGET_CONFIG="workflow/repository/nuget.config"
+          
+          if [ -f "$NUGET_CONFIG" ]; then
+            mkdir -p ~/.nuget/NuGet
+            cp "$NUGET_CONFIG" ~/.nuget/NuGet/NuGet.Config
+            cp "$NUGET_CONFIG" workflow/repository/Source/nuget.config
+            echo "✅ Copied nuget.config to NuGet locations"
+          fi
+          
+          echo "📋 Configured sources:"
+          dotnet nuget list source
       - name: Validate repository structure
         run: |
           set -euo pipefail
