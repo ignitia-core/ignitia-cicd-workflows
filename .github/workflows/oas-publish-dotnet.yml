@@ -101,6 +101,10 @@ jobs:
             -o "workflow/repository/Generated/DotNet/" \
             -n "${{ inputs.namespace }}" \
             -v "${{ steps.semver.outputs.semantic-version }}"
+      - name: Debug - Show generated files
+        run: |
+          echo "📂 Generated files:"
+          ls -laR workflow/repository/Generated/DotNet/
       - name: dotnet build (Release)
         run: dotnet build workflow/repository/Generated/DotNet/*.sln -c Release --no-restore
       - name: Pack NuGet packages
