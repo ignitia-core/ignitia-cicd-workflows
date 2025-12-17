@@ -96,7 +96,7 @@ jobs:
           dotnet tool install --global ignitia.generators.client
       - name: Generate .NET client
         run: |
-          ignitia.generators.client generate-client dotnet \
+          dotnet generate-client dotnet \
             -c "${{ inputs.oas-file-path }}" \
             -o "./Generated/DotNet/" \
             -n "${{ inputs.namespace }}" \
