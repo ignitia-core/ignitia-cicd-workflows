@@ -111,6 +111,32 @@ jobs:
           path: workflow/repository
           fetch-depth: 0
 
+      - name: Activate root nuget.config from nuget.config.hidden (if present)
+        shell: bash
+        run: |
+          set -euo pipefail
+          ROOT="workflow/repository"
+          HIDDEN="$ROOT/nuget.config.hidden"
+          TARGET="$ROOT/nuget.config"
+
+          if [ -f "$HIDDEN" ]; then
+            echo "🔎 Found $(basename "$HIDDEN")"
+
+            if [ -f "$TARGET" ]; then
+              echo "❌ Both nuget.config and nuget.config.hidden exist. Refusing to overwrite."
+              ls -la "$ROOT" | sed -n '1,200p'
+              exit 1
+            fi
+
+            mv "$HIDDEN" "$TARGET"
+            echo "✅ Activated nuget.config (renamed from nuget.config.hidden)"
+          else
+            echo "ℹ️ No nuget.config.hidden found at repo root"
+          fi
+
+          echo "📋 Root-level NuGet files:"
+          ls -la "$ROOT" | grep -E 'nuget\.config(\.hidden)?$' || true
+
       # -------------------- NuGet Placeholder Replacement --------------------
       - name: Detect and replace placeholders in nuget.config
         run: |
