@@ -119,7 +119,7 @@ jobs:
           NUGET_CONFIG="workflow/repository/nuget.config"
           
           if [ ! -f "$NUGET_CONFIG" ]; then
-            echo "ℹ️ No nuget.config found, skipping"
+            echo "ℹ️ No nuget.config found"
             exit 0
           fi
           
@@ -136,20 +136,40 @@ jobs:
           while IFS= read -r placeholder; do
             key="${placeholder#\{\{}"
             key="${key%\}\}}"
+            key_upper="${key^^}"
             
-            param_name="/ignitia/global/${key,,}"
-            param_name="${param_name//_/-}"
-            
-            echo "📦 Fetching: $param_name"
-            
-            value=$(aws ssm get-parameter \
-              --name "$param_name" \
-              --with-decryption \
-              --query "Parameter.Value" \
-              --output text 2>/dev/null) || {
-              echo "❌ Failed to fetch: $param_name"
-              exit 1
-            }
+            case "$key_upper" in
+              CODEARTIFACT-TOKEN|IGNITIA-CODEARTIFACT-TOKEN)
+                echo "📦 Generating CodeArtifact token..."
+                value=$(aws codeartifact get-authorization-token \
+                  --domain ${{ inputs.aws-codeartifact-domain }} \
+                  --query authorizationToken \
+                  --output text)
+                ;;
+              CODEARTIFACT-ENDPOINT|IGNITIA-CODEARTIFACT-ENDPOINT)
+                echo "📦 Fetching CodeArtifact endpoint..."
+                value=$(aws codeartifact get-repository-endpoint \
+                  --domain ${{ inputs.aws-codeartifact-domain }} \
+                  --repository ${{ inputs.package-source }} \
+                  --format nuget \
+                  --query repositoryEndpoint \
+                  --output text)
+                value="${value}v3/index.json"
+                ;;
+              *)
+                echo "📦 Fetching from Parameter Store: /ignitia/global/${key,,}"
+                param_name="/ignitia/global/${key,,}"
+                param_name="${param_name//_/-}"
+                value=$(aws ssm get-parameter \
+                  --name "$param_name" \
+                  --with-decryption \
+                  --query "Parameter.Value" \
+                  --output text 2>/dev/null) || {
+                  echo "❌ Failed to fetch: $param_name"
+                  exit 1
+                }
+                ;;
+            esac
             
             echo "::add-mask::$value"
             sed -i "s|$placeholder|$value|g" "$NUGET_CONFIG"
