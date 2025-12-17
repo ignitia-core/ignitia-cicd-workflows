@@ -105,6 +105,8 @@ jobs:
         run: |
           echo "📂 Generated files:"
           ls -laR workflow/repository/Generated/DotNet/
+      - name: dotnet restore 
+        run: dotnet restore workflow/repository/Generated/DotNet/Source/*.sln
       - name: dotnet build (Release)
         run: dotnet build workflow/repository/Generated/DotNet/Source/*.sln -c Release --no-restore
       - name: Pack NuGet packages
