@@ -8,7 +8,7 @@
 # - GitHub OIDC federation configured with AWS IAM role
 # - All projects enable <RestorePackagesWithLockFile>true</RestorePackagesWithLockFile>
 
-name: dotnet-publish-solution-codeartifact
+name: dotnet-publish-solution-code-artifact
 
 permissions:
   contents: write

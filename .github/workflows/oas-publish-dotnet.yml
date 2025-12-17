@@ -1,0 +1,98 @@
+name: oas-publish-dotnet
+
+permissions:
+  contents: write
+  pull-requests: write
+  id-token: write
+
+concurrency:
+  group: publish-${{ github.repository }}-${{ github.ref }}
+  cancel-in-progress: false
+
+on:
+  workflow_call:
+    inputs:
+      aws-codeartifact-domain:
+        type: string
+        required: false
+        default: "ignitia"
+        description: "CodeArtifact domain name"
+      aws-region:
+        type: string
+        required: false
+        default: "eu-west-1"
+        description: "AWS region"
+      aws-role-arn:
+        type: string
+        required: true
+        description: "IAM role ARN for GitHub OIDC"
+      namespace:
+        description: 'The namespace of the application (ex. Ignitia)'
+        required: true
+        type: string
+      dotnet-version:
+        description: 'The .NET version to use'
+        required: true
+        type: string
+        default: "10.x"
+      oas-file-path:
+        type: string
+        description: Path to the OpenAPI specification file
+        required: false
+        default: "src/oas.yaml"
+      package-source:
+        type: string
+        required: true
+        description: "CodeArtifact repository name (e.g., ignitia-internal or ignitia-platform)"
+      spectral-ruleset:
+        type: string
+        description: URL to the Spectral ruleset to use for validation
+        required: false
+        default: "https://raw.githubusercontent.com/ignitia-core/ignitia-tools-validators-spectral/refs/heads/master/spectral-ruleset.yaml"
+      spectral-validation:
+        type: boolean
+        description: Validate the contract against Ignitia's spectral rules?
+        default: true
+      
+jobs:
+  oas-publish-dotnet:
+    name: oas-publish-dotnet
+    runs-on: ubuntu-latest
+    steps:
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ inputs.aws-role-arn }}
+          aws-region: ${{ inputs.aws-region }}
+      - name: Login to CodeArtifact
+        run: |
+          aws codeartifact login \
+            --tool dotnet \
+            --domain ${{ inputs.aws-codeartifact-domain }} \
+            --repository ${{ inputs.package-source }}
+          echo "✅ Logged in to CodeArtifact"
+      - name: Checkout repository
+        uses: actions/checkout@v5
+        with:
+          path: workflow/repository
+          fetch-depth: 0
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: ${{ inputs.dotnet-version }}
+      - name: Determine Semantic Version
+        id: semver
+        uses: ignitia-core/ignitia-cicd-actions/gitversion-generate-semver@master
+      - name: Inject semantic version into OAS
+        run: |
+          sed -i "s/{{OAS_VERSION}}/${{ steps.semver.outputs.semantic-version }}/g" ./workflow/repository/${{ inputs.oas-file-path }}
+      - if: ${{ inputs.spectral-validation == true }}
+        name: Spectral validation
+        run: |
+          npm install -g @stoplight/spectral
+          spectral lint ./workflow/repository/${{ inputs.oas-file-path }} -r ${{ inputs.spectral-ruleset }}
+      - name: Install .NET tool
+        run: |
+          dotnet tool install --global ignitia.generators.client
+          # Or from your private feed specifically:
+          # dotnet tool install --global ignitia.generators.client --add-source "https://ignitia-246089461294.d.codeartifact.eu-west-1.amazonaws.com/nuget/${{ inputs.package-source }}/v3/index.json"
