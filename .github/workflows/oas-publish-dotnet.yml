@@ -101,3 +101,26 @@ jobs:
             -o "workflow/repository/Generated/DotNet/" \
             -n "${{ inputs.namespace }}" \
             -v "${{ steps.semver.outputs.semantic-version }}"
+      - name: dotnet build (Release)
+        run: dotnet build workflow/repository/Generated/DotNet/*.sln -c Release --no-restore
+      - name: Pack NuGet packages
+        run: |
+          set -euo pipefail
+          find workflow/repository/Generated/DotNet -name "*.csproj" -print0 | \
+            xargs -0 -I {} dotnet pack {} \
+              -c Release \
+              --no-build \
+              -p:PackageVersion=${{ steps.semver.outputs.semantic-version }} \
+              -o ./artifacts
+          echo "✅ Packed $(ls -1 ./artifacts/*.nupkg 2>/dev/null | wc -l) package(s)"
+
+      - name: Push NuGet packages to CodeArtifact
+        run: |
+          set -euo pipefail
+          for pkg in ./artifacts/*.nupkg; do
+            echo "📦 Pushing $(basename "$pkg")..."
+            dotnet nuget push "$pkg" \
+              --source "${{ inputs.package-source }}" \
+              --skip-duplicate
+          done
+          echo "✅ Published all packages"
