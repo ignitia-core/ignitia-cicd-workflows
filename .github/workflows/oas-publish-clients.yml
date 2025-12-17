@@ -48,7 +48,7 @@ on:
       publish-source:
         type: string
         required: true
-        description: "CodeArtifact repository to publish generated clients to (e.g., ignitia-internal or ignitia-platform)"
+        description: "CodeArtifact repository to publish generated clients to"
       spectral-ruleset:
         type: string
         description: URL to the Spectral ruleset to use for validation
@@ -72,83 +72,93 @@ jobs:
     name: oas-publish-clients
     runs-on: ubuntu-latest
     steps:
-      # -------------------- AWS & CodeArtifact Setup --------------------
+      # -------------------- AWS Authentication --------------------
       - name: Configure AWS credentials (OIDC)
         uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: ${{ inputs.aws-role-arn }}
           aws-region: ${{ inputs.aws-region }}
 
-      - name: Login to CodeArtifact for restore (ignitia-internal)
+      # -------------------- Phase 1: Login to Internal + Install Tools --------------------
+      - name: Login to CodeArtifact (ignitia-internal - tools)
         run: |
           aws codeartifact login \
             --tool dotnet \
             --domain ${{ inputs.aws-codeartifact-domain }} \
             --repository ignitia-internal
-          echo "✅ Logged in to ignitia-internal (NuGet restore)"
-
-      - name: Login to CodeArtifact (NuGet - internal)
-        run: |
           aws codeartifact login \
-            --tool dotnet \
+            --tool npm \
             --domain ${{ inputs.aws-codeartifact-domain }} \
             --repository ignitia-internal
-          echo "✅ Logged in to ignitia-internal"
+          echo "✅ Logged in to ignitia-internal (tools)"
 
-      - name: Login to CodeArtifact (NuGet - publish target)
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: ${{ inputs.dotnet-version }}
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ inputs.node-version }}
+
+      - name: Install tools
         run: |
-          aws codeartifact login \
-            --tool dotnet \
+          dotnet tool install --global ignitia.generators.client
+          npm install -g @stoplight/spectral-cli
+          echo "✅ Installed generator and spectral"
+
+      # -------------------- Phase 2: Login to Publish Source --------------------
+      - name: Get CodeArtifact auth token
+        id: codeartifact-token
+        run: |
+          TOKEN=$(aws codeartifact get-authorization-token \
             --domain ${{ inputs.aws-codeartifact-domain }} \
-            --repository ${{ inputs.publish-source }}
-          echo "✅ Logged in to ${{ inputs.publish-source }}"
+            --query authorizationToken \
+            --output text)
+          echo "::add-mask::$TOKEN"
+          echo "token=$TOKEN" >> "$GITHUB_OUTPUT"
 
-      - name: Get publish endpoint (NuGet)
-        id: publish-nuget
-        if: inputs.generate-dotnet
+      - name: Get publish endpoints
+        id: publish-endpoints
         run: |
-          ENDPOINT=$(aws codeartifact get-repository-endpoint \
+          NUGET_ENDPOINT=$(aws codeartifact get-repository-endpoint \
             --domain ${{ inputs.aws-codeartifact-domain }} \
             --repository ${{ inputs.publish-source }} \
             --format nuget \
             --query repositoryEndpoint \
             --output text)
-          echo "endpoint=${ENDPOINT}v3/index.json" >> "$GITHUB_OUTPUT"
-          echo "✅ NuGet publish endpoint: ${ENDPOINT}v3/index.json"
-
-      - name: Get publish endpoint (npm)
-        id: publish-npm
-        if: inputs.generate-typescript
-        run: |
-          ENDPOINT=$(aws codeartifact get-repository-endpoint \
+          echo "nuget=${NUGET_ENDPOINT}v3/index.json" >> "$GITHUB_OUTPUT"
+          
+          NPM_ENDPOINT=$(aws codeartifact get-repository-endpoint \
             --domain ${{ inputs.aws-codeartifact-domain }} \
             --repository ${{ inputs.publish-source }} \
             --format npm \
             --query repositoryEndpoint \
             --output text)
-          echo "endpoint=${ENDPOINT}" >> "$GITHUB_OUTPUT"
-          echo "✅ npm publish endpoint: ${ENDPOINT}"
+          echo "npm=${NPM_ENDPOINT}" >> "$GITHUB_OUTPUT"
+          
+          echo "✅ Publish endpoints retrieved"
 
-      # -------------------- Checkout & Tooling --------------------
+      - name: Login to CodeArtifact (publish source)
+        run: |
+          aws codeartifact login \
+            --tool dotnet \
+            --domain ${{ inputs.aws-codeartifact-domain }} \
+            --repository ${{ inputs.publish-source }}
+          aws codeartifact login \
+            --tool npm \
+            --domain ${{ inputs.aws-codeartifact-domain }} \
+            --repository ${{ inputs.publish-source }}
+          echo "✅ Logged in to ${{ inputs.publish-source }} (publish)"
+
+      # -------------------- Checkout & Versioning --------------------
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
           path: workflow/repository
           fetch-depth: 0
 
-      - name: Setup .NET
-        if: inputs.generate-dotnet
-        uses: actions/setup-dotnet@v4
-        with:
-          dotnet-version: ${{ inputs.dotnet-version }}
-
-      - name: Setup Node.js
-        if: inputs.generate-typescript
-        uses: actions/setup-node@v4
-        with:
-          node-version: ${{ inputs.node-version }}
-
-      # -------------------- Versioning --------------------
       - name: Determine Semantic Version
         id: semver
         uses: ignitia-core/ignitia-cicd-actions/gitversion-generate-semver@master
@@ -162,17 +172,10 @@ jobs:
       - name: Spectral validation
         if: inputs.spectral-validation
         run: |
-          npm install -g @stoplight/spectral-cli
           spectral lint ./workflow/repository/${{ inputs.oas-file-path }} -r ${{ inputs.spectral-ruleset }}
           echo "✅ Contract validated"
 
       # -------------------- .NET Client --------------------
-      - name: Install .NET generator tool
-        if: inputs.generate-dotnet
-        run: |
-          dotnet tool install --global ignitia.generators.client
-          echo "✅ Installed ignitia.generators.client"
-
       - name: Generate .NET client
         if: inputs.generate-dotnet
         run: |
@@ -210,7 +213,8 @@ jobs:
           for pkg in ./artifacts/nuget/*.nupkg; do
             echo "📦 Pushing $(basename "$pkg") to ${{ inputs.publish-source }}..."
             dotnet nuget push "$pkg" \
-              --source "${{ steps.publish-nuget.outputs.endpoint }}" \
+              --source "${{ steps.publish-endpoints.outputs.nuget }}" \
+              --api-key "Bearer ${{ steps.codeartifact-token.outputs.token }}" \
               --skip-duplicate
           done
           echo "✅ Published .NET packages to ${{ inputs.publish-source }}"
@@ -238,7 +242,13 @@ jobs:
         if: inputs.generate-typescript
         run: |
           cd workflow/repository/Generated/TypeScript
-          npm config set registry "${{ steps.publish-npm.outputs.endpoint }}"
+          
+          REGISTRY="${{ steps.publish-endpoints.outputs.npm }}"
+          REGISTRY_HOST=$(echo "$REGISTRY" | sed 's|https://||')
+          
+          npm config set "//${REGISTRY_HOST}:_authToken" "${{ steps.codeartifact-token.outputs.token }}"
+          npm config set registry "$REGISTRY"
+          
           npm publish
           echo "✅ Published TypeScript package to ${{ inputs.publish-source }}"
 
