@@ -89,7 +89,7 @@ jobs:
       - if: ${{ inputs.spectral-validation == true }}
         name: Spectral validation
         run: |
-          npm install -g @stoplight/spectral
+          npm install -g @stoplight/spectral-cli
           spectral lint ./workflow/repository/${{ inputs.oas-file-path }} -r ${{ inputs.spectral-ruleset }}
       - name: Install .NET tool
         run: |
