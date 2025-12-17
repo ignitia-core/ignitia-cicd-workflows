@@ -61,7 +61,7 @@ on:
       aws-parameter-store-github-pat:
         type: string
         required: false
-        default: "/ignitia/prod/internal/github-pat"
+        default: "/ignitia/global/github-pat"
         description: "Parameter Store path for GitHub PAT (cross-repo operations)"
       repository:
         type: string
