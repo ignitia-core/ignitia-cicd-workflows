@@ -97,7 +97,7 @@ jobs:
       - name: Generate .NET client
         run: |
           generate-client dotnet \
-            -c "${{ inputs.oas-file-path }}" \
-            -o "./Generated/DotNet/" \
+            -c "workflow/repository/${{ inputs.oas-file-path }}" \
+            -o "workflow/repository/Generated/DotNet/" \
             -n "${{ inputs.namespace }}" \
             -v "${{ steps.semver.outputs.semantic-version }}"
