@@ -87,14 +87,21 @@ jobs:
             --repository ignitia-internal
           echo "✅ Logged in to ignitia-internal (NuGet restore)"
 
-      - name: Login to CodeArtifact for npm restore (ignitia-internal)
-        if: inputs.generate-typescript
+      - name: Login to CodeArtifact (NuGet - internal)
         run: |
           aws codeartifact login \
-            --tool npm \
+            --tool dotnet \
             --domain ${{ inputs.aws-codeartifact-domain }} \
             --repository ignitia-internal
-          echo "✅ Logged in to ignitia-internal (npm restore)"
+          echo "✅ Logged in to ignitia-internal"
+
+      - name: Login to CodeArtifact (NuGet - publish target)
+        run: |
+          aws codeartifact login \
+            --tool dotnet \
+            --domain ${{ inputs.aws-codeartifact-domain }} \
+            --repository ${{ inputs.publish-source }}
+          echo "✅ Logged in to ${{ inputs.publish-source }}"
 
       - name: Get publish endpoint (NuGet)
         id: publish-nuget
