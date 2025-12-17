@@ -8,7 +8,7 @@
 # - GitHub OIDC federation configured with AWS IAM role
 # - All projects enable <RestorePackagesWithLockFile>true</RestorePackagesWithLockFile>
 
-name: dotnet-publish-solution-to-codeartifact
+name: dotnet-publish-solution-codeartifact
 
 permissions:
   contents: write
@@ -74,83 +74,12 @@ on:
         description: "Target repo (org/repo) to publish from"
 
 jobs:
-  dotnet-publish-solution:
+  dotnet-publish-solution-codeartifact:
     runs-on: ubuntu-latest
     continue-on-error: false
     steps:
       # -------------------- AWS OIDC Authentication --------------------
-      - name: Configure AWS credentials (OIDC)
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          role-to-assume: ${{ inputs.aws-role-arn }}
-          aws-region: ${{ inputs.aws-region }}
 
-      - name: Fetch GitHub PAT from Parameter Store
-        id: github-pat
-        run: |
-          set -euo pipefail
-          PAT=$(aws ssm get-parameter \
-            --name "${{ inputs.aws-parameter-store-github-pat }}" \
-            --with-decryption \
-            --query "Parameter.Value" \
-            --output text)
-          if [ -z "$PAT" ]; then
-            echo "❌ Missing GitHub PAT in Parameter Store: ${{ inputs.aws-parameter-store-github-pat }}"
-            exit 1
-          fi
-          echo "::add-mask::$PAT"
-          echo "value=$PAT" >> "$GITHUB_OUTPUT"
-          echo "✅ Fetched GitHub PAT from Parameter Store"
-
-      - name: Fetch placeholder secrets from Parameter Store
-        id: placeholders
-        if: inputs.secret-placeholders != ''
-        run: |
-          set -euo pipefail
-          IFS='~' read -r -a PATHS <<< "${{ inputs.secret-placeholders }}"
-          VALUES=()
-          KEYS=()
-          
-          for path in "${PATHS[@]}"; do
-            value=$(aws ssm get-parameter \
-              --name "$path" \
-              --with-decryption \
-              --query "Parameter.Value" \
-              --output text)
-            if [ -z "$value" ]; then
-              echo "❌ Missing secret in Parameter Store: $path"
-              exit 1
-            fi
-            echo "::add-mask::$value"
-            VALUES+=("$value")
-            
-            # Extract key name from path (last segment)
-            key=$(basename "$path")
-            KEYS+=("{{${key}}}")
-          done
-          
-          # Join with tilde separator
-          printf 'values=%s\n' "$(IFS='~'; echo "${VALUES[*]}")" >> "$GITHUB_OUTPUT"
-          printf 'keys=%s\n' "$(IFS='~'; echo "${KEYS[*]}")" >> "$GITHUB_OUTPUT"
-          echo "✅ Fetched ${#PATHS[@]} placeholder secret(s)"
-
-      - name: Login to CodeArtifact
-        run: |
-          set -euo pipefail
-          aws codeartifact login \
-            --tool dotnet \
-            --domain ${{ inputs.aws-codeartifact-domain }} \
-            --repository ${{ inputs.package-source }}
-          echo "✅ Logged in to CodeArtifact: ${{ inputs.aws-codeartifact-domain }}/${{ inputs.package-source }}"
-
-      # -------------------- Checkout & Validation --------------------
-      - name: Checkout target repository
-        uses: actions/checkout@v4
-        with:
-          repository: ${{ inputs.repository }}
-          token: ${{ steps.github-pat.outputs.value }}
-          path: workflow/repository
-          fetch-depth: 0
 
       - name: Validate repository structure
         run: |
