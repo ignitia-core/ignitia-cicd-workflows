@@ -186,6 +186,15 @@ jobs:
             -v "${{ steps.semver.outputs.semantic-version }}"
           echo "✅ Generated .NET client"
 
+      - name: Package .NET client generation output
+        if: inputs.generate-dotnet
+        uses: actions/upload-artifact@v4
+        with:
+          name: dotnet-generated-client-${{ steps.semver.outputs.semantic-version }}
+          path: workflow/repository/Generated/DotNet/
+          retention-days: 2
+          if-no-files-found: error
+
       - name: Build .NET client
         if: inputs.generate-dotnet
         run: |
