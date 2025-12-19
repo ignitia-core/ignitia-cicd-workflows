@@ -261,6 +261,42 @@ jobs:
           npm publish
           echo "✅ Published TypeScript package to ${{ inputs.publish-source }}"
 
+      # -------------------- Release Creation --------------------
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: ${{ steps.semver.outputs.semantic-version }}
+          name: Release ${{ steps.semver.outputs.semantic-version }}
+          body: |
+            ## Generated Clients
+            
+            ### .NET
+            - **Package**: `${{ inputs.namespace }}.Client`
+            - **Version**: `${{ steps.semver.outputs.semantic-version }}`
+            - **Feed**: `${{ inputs.publish-source }}`
+            
+            ### TypeScript
+            - **Package**: `@${{ inputs.namespace }}/client` (lowercase)
+            - **Version**: `${{ steps.semver.outputs.semantic-version }}`
+            - **Feed**: `${{ inputs.publish-source }}`
+
+            ## Installation
+            **NuGet**:
+            ```bash
+            dotnet add package ${{ inputs.namespace }}.Client --version ${{ steps.semver.outputs.semantic-version }}
+            ```
+            
+            **npm**:
+            ```bash
+            npm install @<namespace>/client@${{ steps.semver.outputs.semantic-version }}
+            ```
+            
+            Replace `<namespace>` with lowercase `${{ inputs.namespace }}`.
+
+          draft: false
+          prerelease: ${{ contains(steps.semver.outputs.semantic-version, '-') }}
+          generate_release_notes: false
+
       # -------------------- Summary --------------------
       - name: Summary
         run: |
