@@ -197,34 +197,28 @@ jobs:
           CONTRACT_PROJECT=$(find workflow/repository/Generated/DotNet -name "*Contract*.csproj" | head -1)
           
           if [ -z "$CONTRACT_PROJECT" ]; then
-            echo "⚠️  No Contract project found, trying any .csproj"
-            CONTRACT_PROJECT=$(find workflow/repository/Generated/DotNet -name "*.csproj" | head -1)
-          fi
-          
-          if [ -z "$CONTRACT_PROJECT" ]; then
-            echo "❌ No .csproj found in generated output"
+            echo "❌ No Contract project found"
             exit 1
           fi
           
           PROJECT_DIR=$(dirname "$CONTRACT_PROJECT")
-          echo "📁 Project directory: ${PROJECT_DIR}"
+          RESOURCE_NAME="${{ inputs.namespace }}.Contract.yaml"
           
-          # Copy OAS file as Contract.yaml (namespace will be added automatically)
+          echo "📄 Resource name: ${RESOURCE_NAME}"
+          
+          # Copy OAS file
           cp "workflow/repository/${{ inputs.oas-file-path }}" "${PROJECT_DIR}/Contract.yaml"
-          echo "✅ Copied OAS to ${PROJECT_DIR}/Contract.yaml"
           
-          # Add embedded resource to .csproj if not already present
+          # Add embedded resource with LogicalName
           if ! grep -q "Contract.yaml" "$CONTRACT_PROJECT"; then
             sed -i "/<\/Project>/i \\
             <ItemGroup>\\
-              <EmbeddedResource Include=\"Contract.yaml\" />\\
+              <EmbeddedResource Include=\"Contract.yaml\">\\
+                <LogicalName>${RESOURCE_NAME}</LogicalName>\\
+              </EmbeddedResource>\\
             </ItemGroup>" "$CONTRACT_PROJECT"
-            echo "✅ Added embedded resource to ${CONTRACT_PROJECT}"
-          else
-            echo "ℹ️  Embedded resource already configured"
+            echo "✅ Embedded as ${RESOURCE_NAME}"
           fi
-          
-          echo "✅ Contract file embedded as Contract.yaml"
 
       - name: Package .NET client generation output
         if: inputs.generate-dotnet
