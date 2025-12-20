@@ -193,16 +193,7 @@ jobs:
         run: |
           set -euo pipefail
           
-          # Extract application name from OAS title (e.g., "Some Test App V1 API" -> "SomeTestAppV1Api")
-          APP_NAME=$(yq eval '.info.title' "workflow/repository/${{ inputs.oas-file-path }}" | \
-            sed 's/[^a-zA-Z0-9]//g')
-          
-          # Construct the resource name
-          RESOURCE_NAME="${{ inputs.namespace }}.${APP_NAME}.Contract.yaml"
-          
-          echo "📄 Resource name: ${RESOURCE_NAME}"
-          
-          # Find the main contract project (should contain .csproj with "Contract" in name)
+          # Find the main contract project
           CONTRACT_PROJECT=$(find workflow/repository/Generated/DotNet -name "*Contract*.csproj" | head -1)
           
           if [ -z "$CONTRACT_PROJECT" ]; then
@@ -218,29 +209,22 @@ jobs:
           PROJECT_DIR=$(dirname "$CONTRACT_PROJECT")
           echo "📁 Project directory: ${PROJECT_DIR}"
           
-          # Copy OAS file with correct naming convention
-          cp "workflow/repository/${{ inputs.oas-file-path }}" "${PROJECT_DIR}/${RESOURCE_NAME}"
-          echo "✅ Copied OAS to ${PROJECT_DIR}/${RESOURCE_NAME}"
+          # Copy OAS file as Contract.yaml (namespace will be added automatically)
+          cp "workflow/repository/${{ inputs.oas-file-path }}" "${PROJECT_DIR}/Contract.yaml"
+          echo "✅ Copied OAS to ${PROJECT_DIR}/Contract.yaml"
           
           # Add embedded resource to .csproj if not already present
-          if ! grep -q "${RESOURCE_NAME}" "$CONTRACT_PROJECT"; then
-            # Find the closing </Project> tag and insert before it
+          if ! grep -q "Contract.yaml" "$CONTRACT_PROJECT"; then
             sed -i "/<\/Project>/i \\
             <ItemGroup>\\
-              <EmbeddedResource Include=\"${RESOURCE_NAME}\" />\\
+              <EmbeddedResource Include=\"Contract.yaml\" />\\
             </ItemGroup>" "$CONTRACT_PROJECT"
             echo "✅ Added embedded resource to ${CONTRACT_PROJECT}"
           else
             echo "ℹ️  Embedded resource already configured"
           fi
           
-          # Verify the file exists
-          if [ -f "${PROJECT_DIR}/${RESOURCE_NAME}" ]; then
-            echo "✅ Contract file embedded: ${RESOURCE_NAME}"
-          else
-            echo "❌ Failed to embed contract file"
-            exit 1
-          fi
+          echo "✅ Contract file embedded as Contract.yaml"
 
       - name: Package .NET client generation output
         if: inputs.generate-dotnet
