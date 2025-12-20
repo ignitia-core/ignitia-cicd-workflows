@@ -106,7 +106,9 @@ jobs:
         run: |
           dotnet tool install --global ignitia.generators.client
           npm install -g @stoplight/spectral-cli
-          echo "✅ Installed generator and spectral"
+          sudo wget -qO /usr/local/bin/yq https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64
+          sudo chmod +x /usr/local/bin/yq
+          echo "✅ Installed generator, spectral, and yq"
 
       # -------------------- Phase 2: Login to Publish Source --------------------
       - name: Get CodeArtifact auth token
@@ -185,6 +187,60 @@ jobs:
             -n "${{ inputs.namespace }}" \
             -v "${{ steps.semver.outputs.semantic-version }}"
           echo "✅ Generated .NET client"
+
+      - name: Embed OAS contract in .NET package
+        if: inputs.generate-dotnet
+        run: |
+          set -euo pipefail
+          
+          # Extract application name from OAS title (e.g., "Some Test App V1 API" -> "SomeTestAppV1Api")
+          APP_NAME=$(yq eval '.info.title' "workflow/repository/${{ inputs.oas-file-path }}" | \
+            sed 's/[^a-zA-Z0-9]//g')
+          
+          # Construct the resource name
+          RESOURCE_NAME="${{ inputs.namespace }}.${APP_NAME}.Contract.yaml"
+          
+          echo "📄 Resource name: ${RESOURCE_NAME}"
+          
+          # Find the main contract project (should contain .csproj with "Contract" in name)
+          CONTRACT_PROJECT=$(find workflow/repository/Generated/DotNet -name "*Contract*.csproj" | head -1)
+          
+          if [ -z "$CONTRACT_PROJECT" ]; then
+            echo "⚠️  No Contract project found, trying any .csproj"
+            CONTRACT_PROJECT=$(find workflow/repository/Generated/DotNet -name "*.csproj" | head -1)
+          fi
+          
+          if [ -z "$CONTRACT_PROJECT" ]; then
+            echo "❌ No .csproj found in generated output"
+            exit 1
+          fi
+          
+          PROJECT_DIR=$(dirname "$CONTRACT_PROJECT")
+          echo "📁 Project directory: ${PROJECT_DIR}"
+          
+          # Copy OAS file with correct naming convention
+          cp "workflow/repository/${{ inputs.oas-file-path }}" "${PROJECT_DIR}/${RESOURCE_NAME}"
+          echo "✅ Copied OAS to ${PROJECT_DIR}/${RESOURCE_NAME}"
+          
+          # Add embedded resource to .csproj if not already present
+          if ! grep -q "${RESOURCE_NAME}" "$CONTRACT_PROJECT"; then
+            # Find the closing </Project> tag and insert before it
+            sed -i "/<\/Project>/i \\
+            <ItemGroup>\\
+              <EmbeddedResource Include=\"${RESOURCE_NAME}\" />\\
+            </ItemGroup>" "$CONTRACT_PROJECT"
+            echo "✅ Added embedded resource to ${CONTRACT_PROJECT}"
+          else
+            echo "ℹ️  Embedded resource already configured"
+          fi
+          
+          # Verify the file exists
+          if [ -f "${PROJECT_DIR}/${RESOURCE_NAME}" ]; then
+            echo "✅ Contract file embedded: ${RESOURCE_NAME}"
+          else
+            echo "❌ Failed to embed contract file"
+            exit 1
+          fi
 
       - name: Package .NET client generation output
         if: inputs.generate-dotnet
