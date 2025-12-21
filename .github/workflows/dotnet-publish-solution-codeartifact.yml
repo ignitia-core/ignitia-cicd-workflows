@@ -325,9 +325,10 @@ jobs:
         if: inputs.publish-type == 'docker'
         uses: ignitia-core/ignitia-cicd-actions/aws-publish-docker-image@master
         with:
+          container-name: ${{ inputs.application }}
           software-version: ${{ steps.semver.outputs.semantic-version }}
           aws-region: ${{ inputs.aws-region }}
-          dotnet-version: ${{ inputs.dotnet-version }}
+          dotnet-version: ${{ inputs.dotnet-version }}}}
 
       # -------------------- Post-publish: tag/release/cleanup/env bump --------------------
       - name: Create Tag & GitHub Release
