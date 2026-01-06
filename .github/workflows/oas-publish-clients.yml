@@ -106,7 +106,9 @@ jobs:
         run: |
           dotnet tool install --global ignitia.generators.client
           npm install -g @stoplight/spectral-cli
-          echo "✅ Installed generator and spectral"
+          sudo wget -qO /usr/local/bin/yq https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64
+          sudo chmod +x /usr/local/bin/yq
+          echo "✅ Installed generator, spectral, and yq"
 
       # -------------------- Phase 2: Login to Publish Source --------------------
       - name: Get CodeArtifact auth token
@@ -186,6 +188,47 @@ jobs:
             -v "${{ steps.semver.outputs.semantic-version }}"
           echo "✅ Generated .NET client"
 
+      - name: Embed OAS contract in .NET package
+        if: inputs.generate-dotnet
+        run: |
+          set -euo pipefail
+          
+          # Find the main contract project
+          CONTRACT_PROJECT=$(find workflow/repository/Generated/DotNet -name "*Contract*.csproj" | head -1)
+          
+          if [ -z "$CONTRACT_PROJECT" ]; then
+            echo "❌ No Contract project found"
+            exit 1
+          fi
+          
+          PROJECT_DIR=$(dirname "$CONTRACT_PROJECT")
+          RESOURCE_NAME="${{ inputs.namespace }}.Contract.yaml"
+          
+          echo "📄 Resource name: ${RESOURCE_NAME}"
+          
+          # Copy OAS file
+          cp "workflow/repository/${{ inputs.oas-file-path }}" "${PROJECT_DIR}/Contract.yaml"
+          
+          # Add embedded resource with LogicalName
+          if ! grep -q "Contract.yaml" "$CONTRACT_PROJECT"; then
+            sed -i "/<\/Project>/i \\
+            <ItemGroup>\\
+              <EmbeddedResource Include=\"Contract.yaml\">\\
+                <LogicalName>${RESOURCE_NAME}</LogicalName>\\
+              </EmbeddedResource>\\
+            </ItemGroup>" "$CONTRACT_PROJECT"
+            echo "✅ Embedded as ${RESOURCE_NAME}"
+          fi
+
+      - name: Package .NET client generation output
+        if: inputs.generate-dotnet
+        uses: actions/upload-artifact@v4
+        with:
+          name: dotnet-generated-client-${{ steps.semver.outputs.semantic-version }}
+          path: workflow/repository/Generated/DotNet/
+          retention-days: 2
+          if-no-files-found: error
+
       - name: Build .NET client
         if: inputs.generate-dotnet
         run: |
@@ -251,6 +294,42 @@ jobs:
           
           npm publish
           echo "✅ Published TypeScript package to ${{ inputs.publish-source }}"
+
+      # -------------------- Release Creation --------------------
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: ${{ steps.semver.outputs.semantic-version }}
+          name: Release ${{ steps.semver.outputs.semantic-version }}
+          body: |
+            ## Generated Clients
+            
+            ### .NET
+            - **Package**: `${{ inputs.namespace }}.Client`
+            - **Version**: `${{ steps.semver.outputs.semantic-version }}`
+            - **Feed**: `${{ inputs.publish-source }}`
+            
+            ### TypeScript
+            - **Package**: `@${{ inputs.namespace }}/client` (lowercase)
+            - **Version**: `${{ steps.semver.outputs.semantic-version }}`
+            - **Feed**: `${{ inputs.publish-source }}`
+
+            ## Installation
+            **NuGet**:
+            ```bash
+            dotnet add package ${{ inputs.namespace }}.Client --version ${{ steps.semver.outputs.semantic-version }}
+            ```
+            
+            **npm**:
+            ```bash
+            npm install @<namespace>/client@${{ steps.semver.outputs.semantic-version }}
+            ```
+            
+            Replace `<namespace>` with lowercase `${{ inputs.namespace }}`.
+
+          draft: false
+          prerelease: ${{ contains(steps.semver.outputs.semantic-version, '-') }}
+          generate_release_notes: false
 
       # -------------------- Summary --------------------
       - name: Summary
