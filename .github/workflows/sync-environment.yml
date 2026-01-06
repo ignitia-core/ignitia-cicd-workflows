@@ -1,5 +1,14 @@
 name: Sync Environment Workflow (Platform CLI)
 
+permissions:
+  contents: write
+  pull-requests: write
+  id-token: write
+
+concurrency:
+  group: publish-${{ github.repository }}-${{ github.ref }}
+  cancel-in-progress: false
+
 on:
   workflow_call:
     inputs:
