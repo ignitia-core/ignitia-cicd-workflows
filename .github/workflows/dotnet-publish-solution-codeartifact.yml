@@ -72,6 +72,11 @@ on:
         type: string
         required: true
         description: "Target repo (org/repo) to publish from"
+      env-repo-suffix:
+        type: string
+        required: false
+        default: "environment"
+        description: "Suffix for environment repo (e.g., 'environment' results in '{app}-environment')"
 
 jobs:
   dotnet-publish-solution-codeartifact:
@@ -374,7 +379,7 @@ jobs:
         if: inputs.publish-type == 'docker' && (github.ref == 'refs/heads/master' || github.ref == 'refs/heads/main')
         uses: ignitia-core/ignitia-cicd-actions/push-environment@master
         with:
-          env-repo-name: ignitia-core/${{ inputs.application }}
+          env-repo-name: ignitia-core/${{ inputs.application }}-${{ inputs.env-repo-suffix }}
           version: ${{ steps.semver.outputs.semantic-version }}
           type: "api"
         env:
