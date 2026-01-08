@@ -1,0 +1,177 @@
+name: oas-publish-contract
+
+on:
+  workflow_call:
+    inputs:
+      namespace:
+        description: 'The namespace of the application (ex. Ignitia)'
+        required: true
+        type: string
+      dotnet-version:
+        description: 'The .NET version to use'
+        required: true
+        type: string
+        default: "10.x"
+      oas-file-path:
+        type: string
+        description: Path to the OpenAPI specification file
+        required: false
+        default: "src/oas.yaml"
+      spectral-ruleset:
+        type: string
+        description: URL to the Spectral ruleset to use for validation
+        required: false
+        default: "https://spectral.jaytech.nl/spectral-ruleset.yaml"
+      spectral-validation:
+        type: boolean
+        description: Validate the contract against Ignitia's spectral rules?
+        default: true
+    secrets:
+      azure-api-key:
+        description: The Azure API key
+        required: false
+      azure-source:
+        description: The Azure Artifacts Source
+        required: false
+      azure-feed:
+        description: The Azure Artifacts Feed
+        required: false
+      pat-github:
+        description: GitHub Personal Access Token with repo scope
+        required: true
+      
+jobs:
+  oas-publish-contract:
+    name: oas-publish-contract
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+        with:
+          token: ${{ secrets.pat-github }}
+          path: workflow/repository
+          fetch-depth: 0
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: ${{ inputs.dotnet-version }}
+      - name: Determine Semantic Version
+        id: semver
+        uses: ignitia-core/ignitia-cicd-actions/gitversion-generate-semver@master
+      - name: Inject semantic version into OAS
+        run: |
+          sed -i "s/{{OAS_VERSION}}/${{ steps.semver.outputs.semantic-version }}/g" ./workflow/repository/${{ inputs.oas-file-path }}
+      - if: ${{ inputs.spectral-validation == true }}
+        name: Spectral validation
+        run: |
+          npm install -g @stoplight/spectral
+          spectral lint ./workflow/repository/${{ inputs.oas-file-path }} -r ${{ inputs.spectral-ruleset }}
+      
+
+      - name: Create Tag & GitHub Release
+        if: github.ref == 'refs/heads/master' || github.ref == 'refs/heads/main'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ steps.github-pat.outputs.value }}
+          GIT_AUTHOR_NAME: ci
+          GIT_AUTHOR_EMAIL: ci@ignitia
+        run: |
+          set -euo pipefail
+          cd workflow/repository
+          
+          # Configure git
+          git config user.name "$GIT_AUTHOR_NAME"
+          git config user.email "$GIT_AUTHOR_EMAIL"
+          
+          tag="${{ steps.semver.outputs.semantic-version }}"
+          
+          # Create annotated tag (idempotent with -f)
+          git tag -a "$tag" -m "Release $tag" -f
+          git push "https://x-access-token:${{ secrets.pat-github }}@github.com/${{ inputs.repository }}" "+refs/tags/$tag"
+          
+          # Create GitHub Release (idempotent via gh CLI)
+          if gh release view "$tag" --repo "${{ inputs.repository }}" >/dev/null 2>&1; then
+            echo "ℹ️ Release $tag already exists"
+          else
+            gh release create "$tag" \
+              --repo "${{ inputs.repository }}" \
+              --title "Release $tag" \
+              --notes "Automated release from CI pipeline" \
+              --verify-tag
+            echo "✅ Created release $tag"
+          fi
+
+      - name: Cleanup Old Releases & Tags
+        if: github.ref == 'refs/heads/master' || github.ref == 'refs/heads/main'
+        uses: ignitia-core/ignitia-cicd-actions/github-clean-releases@master
+        with:
+          keep: 10
+          token: ${{ secrets.pat-github }}
+          semantic-version: ${{ steps.semver.outputs.semantic-version }}
+          clean-prereleases: "true"
+          clean-old-releases: "true"
+
+      - name: Checkout Client Generator
+        uses: actions/checkout@v3
+        with:
+          repository: JayTechHQ/jaytech-generators-oas-client
+          token: ${{ secrets.pat-github }}
+          path: workflow/client-generator
+          fetch-depth: 0
+
+      - name: Run Client Generator for .NET
+        shell: bash
+        run: |
+          sed -i "s~{{IN}}~../../../../../workflow/repository/${{ inputs.oas-file-path }}~g" ./workflow/client-generator/Source/Assemblies/Ignitia.Generators.Client/Properties/launchSettings.json
+          sed -i "s~{{OUT}}~../../../../../workflow/repository/generated-dotnet~g" ./workflow/client-generator/Source/Assemblies/Ignitia.Generators.Client/Properties/launchSettings.json
+          sed -i "s~{{NAMESPACE}}~${{ inputs.namespace }}~g" ./workflow/client-generator/Source/Assemblies/Ignitia.Generators.Client/Properties/launchSettings.json
+          sed -i "s~{{VERSION}}~${{ steps.semver.outputs.semantic-version }}~g" ./workflow/client-generator/Source/Assemblies/Ignitia.Generators.Client/Properties/launchSettings.json
+          sed -i "s~{{AZURE_API_KEY}}~${{ secrets.azure-api-key }}~g" ./workflow/client-generator/nuget.config
+          cd ./workflow/client-generator/Source/Assemblies/Ignitia.Generators.Client
+          dotnet run --launch-profile Production.DotNet
+
+      - name: dotnet build (Release)
+        run: dotnet build workflow/repository/Source/*.sln -c Release --no-restore
+
+      - name: Publish .NET library (NuGet)
+        if: inputs.publish-type == 'nuget'
+        uses: ignitia-core/ignitia-cicd-actions/dotnet-publish-nuget-packages@master
+        with:
+          nuget-api-key: ${{ steps.nuget-api-key.outputs.api-key }}
+          package-path: workflow/repository/${{ inputs.package-path }}
+          package-source: ${{ inputs.package-source }}
+          package-version: ${{ steps.semver.outputs.semantic-version }}
+
+      # - name: Run Client Generator for TypeScript
+      #   shell: bash
+      #   run: |
+      #     sed -i "s~{{IN}}~../../../../../workflow/repository/${{ inputs.oas-file-path }}~g" ./workflow/client-generator/Source/Assemblies/Ignitia.Generators.Client/Properties/launchSettings.json
+      #     sed -i "s~{{OUT}}~../../../../../workflow/repository/generated-typescript~g" ./workflow/client-generator/Source/Assemblies/Ignitia.Generators.Client/Properties/launchSettings.json
+      #     sed -i "s~{{NAMESPACE}}~${{ inputs.namespace }}~g" ./workflow/client-generator/Source/Assemblies/Ignitia.Generators.Client/Properties/launchSettings.json
+      #     sed -i "s~{{VERSION}}~${{ steps.semver.outputs.semantic-version }}~g" ./workflow/client-generator/Source/Assemblies/Ignitia.Generators.Client/Properties/launchSettings.json
+      #     sed -i "s~{{AZURE_API_KEY}}~${{ secrets.azure-api-key }}~g" ./workflow/client-generator/nuget.config
+      #     cd ./workflow/client-generator/Source/Assemblies/Ignitia.Generators.Client
+      #     dotnet run --launch-profile Production.TypeScript
+      
+      - name: Cleanup Old Releases & Tags
+        if: github.ref == 'refs/heads/master' || github.ref == 'refs/heads/main'
+        uses: ignitia-core/ignitia-cicd-actions/github-clean-releases@master
+        with:
+          keep: 10
+          token: ${{ steps.github-pat.outputs.value }}
+          semantic-version: ${{ steps.semver.outputs.semantic-version }}
+          clean-prereleases: "true"
+          clean-old-releases: "true"
+
+      - name: Bump -environment repo
+        if: inputs.publish-type == 'docker' && (github.ref == 'refs/heads/master' || github.ref == 'refs/heads/main')
+        uses: ignitia-core/ignitia-cicd-actions/push-environment@master
+        with:
+          application: ${{ inputs.application }}
+          version: ${{ steps.semver.outputs.semantic-version }}
+        env:
+          GH_TOKEN: ${{ steps.github-pat.outputs.value }}
+
+
+
+      
