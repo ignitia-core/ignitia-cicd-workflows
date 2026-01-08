@@ -101,7 +101,9 @@ jobs:
           echo "✅ Updated Lambda environment variables"
       
       - name: Wait for Lambda configuration update
-        run: sleep 40
+        run: |
+          aws lambda wait function-updated --function-name ${{ inputs.lambda-function }}
+          echo "✅ Lambda configuration update completed"
       
       - name: Update Lambda container image
         run: |
