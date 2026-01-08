@@ -20,21 +20,9 @@ on:
         description: The name of the lambda function
         type: string
         required: true
-      aws-role-arn:
-        description: The ARN of the AWS IAM role to assume via OIDC
-        type: string
-        required: true
-      aws-codeartifact-domain:
-        type: string
-        required: false
-        default: "ignitia"
-        description: "CodeArtifact domain name"
     secrets:
       aws-region:
         description: The region in AWS to push to
-        required: true
-      pat-github:
-        description: GitHub PAT
         required: true
 
 jobs:
@@ -92,56 +80,34 @@ jobs:
     if: needs.preparations.outputs.api_changed == 'true'
     runs-on: ubuntu-latest
     steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      
       - name: Configure AWS credentials via OIDC
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          role-to-assume: ${{ inputs.aws-role-arn }}
+          role-to-assume: arn:aws:iam::246089461294:role/ignitia-github-cicd
           aws-region: ${{ secrets.aws-region }}
       
-      - name: Checkout platform tools
-        uses: actions/checkout@v4
-        with:
-          repository: ignitia-core/ignitia-tools-generators-platform
-          token: ${{ secrets.pat-github }}
-          path: ./platform-tools
-      
-      - name: Setup .NET
-        uses: actions/setup-dotnet@v4
-        with:
-          dotnet-version: '8.x'
-      
-      - name: Login to CodeArtifact
-        run: |
-          aws codeartifact login \
-            --tool dotnet \
-            --domain ${{ inputs.aws-codeartifact-domain }} \
-            --repository ignitia-internal
-          echo "✅ Logged in to CodeArtifact for NuGet packages"
-      
-      - name: Build platform CLI
-        working-directory: ./platform-tools/Source
-        run: |
-          dotnet build Ignitia.Clis.Platform.sln -c Release
-          dotnet publish Assemblies/Ignitia.Clis.Platform/Ignitia.Clis.Platform.csproj -c Release -o ../../cli-output
-      
-      - name: Checkout calling repository
-        uses: actions/checkout@v4
-        with:
-          path: ./repo
-      
       - name: Update Lambda environment variables
-        working-directory: ./cli-output
         run: |
-          dotnet Ignitia.Clis.Platform.dll aws-lambda-update-environment \
-            --env-file ../repo/${{ needs.preparations.outputs.environment }}.json \
-            --function-name ${{ inputs.lambda-function }}
+          # Read environment variables from JSON file
+          ENV_VARS=$(jq -c 'to_entries | map({(.key): .value}) | add' ${{ needs.preparations.outputs.environment }}.json)
+          
+          # Update Lambda configuration
+          aws lambda update-function-configuration \
+            --function-name ${{ inputs.lambda-function }} \
+            --environment "Variables=$ENV_VARS"
+          
+          echo "✅ Updated Lambda environment variables"
       
       - name: Wait for Lambda configuration update
         run: sleep 40
       
       - name: Update Lambda container image
-        working-directory: ./cli-output
         run: |
-          dotnet Ignitia.Clis.Platform.dll aws-lambda-update-image \
-            --image-uri ${{ inputs.api-image-uri }}:${{ needs.preparations.outputs.api_version }} \
-            --function-name ${{ inputs.lambda-function }}
+          aws lambda update-function-code \
+            --function-name ${{ inputs.lambda-function }} \
+            --image-uri ${{ inputs.api-image-uri }}:${{ needs.preparations.outputs.api_version }}
+          
+          echo "✅ Updated Lambda container image to version ${{ needs.preparations.outputs.api_version }}"
