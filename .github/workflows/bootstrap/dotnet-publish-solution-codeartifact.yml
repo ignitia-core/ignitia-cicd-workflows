@@ -374,7 +374,7 @@ jobs:
         if: inputs.publish-type == 'docker' && (github.ref == 'refs/heads/master' || github.ref == 'refs/heads/main')
         uses: ignitia-core/ignitia-cicd-actions/push-environment@master
         with:
-          env-repo-name: ${{ inputs.application }}
+          env-repo-name: ignitia-core/${{ inputs.application }}
           version: ${{ steps.semver.outputs.semantic-version }}
           type: "api"
         env:
