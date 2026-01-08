@@ -20,9 +20,9 @@ on:
         description: The name of the lambda function
         type: string
         required: true
-    secrets:
       aws-region:
         description: The region in AWS to push to
+        type: string
         required: true
 
 jobs:
@@ -87,7 +87,7 @@ jobs:
         uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: arn:aws:iam::246089461294:role/ignitia-github-cicd
-          aws-region: ${{ secrets.aws-region }}
+          aws-region: ${{ inputs.aws-region }}
       
       - name: Update Lambda environment variables
         run: |
