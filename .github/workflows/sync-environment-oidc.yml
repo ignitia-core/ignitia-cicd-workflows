@@ -91,13 +91,12 @@ jobs:
       
       - name: Update Lambda environment variables
         run: |
-          # Read environment variables from JSON file
-          ENV_VARS=$(jq -c 'to_entries | map({(.key): .value}) | add' ${{ needs.preparations.outputs.environment }}.json)
-          
-          # Update Lambda configuration
-          aws lambda update-function-configuration \
-            --function-name ${{ inputs.lambda-function }} \
-            --environment "Variables=$ENV_VARS"
+          # Convert each JSON key-value pair into an environment variable string, preserving quotes around string values
+          env_vars=$(jq -r 'to_entries | map("\(.key)=\(.value|tojson)") | .[]' ${{ needs.preparations.outputs.environment }}.json)
+          # Convert newline-separated key-value pairs to a comma-separated list
+          env_vars_formatted=$(echo "$env_vars" | paste -sd, -)
+          # Update the Lambda function configuration with the new environment variables
+          aws lambda update-function-configuration --function-name ${{ inputs.lambda-function }} --environment "Variables={${env_vars_formatted}}"
           
           echo "✅ Updated Lambda environment variables"
       
