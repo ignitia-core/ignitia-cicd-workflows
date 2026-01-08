@@ -36,14 +36,11 @@ on:
         description: The '[org]/[repository]' location of the UI repository
         type: string
         required: true
-      platform-config:
-        description: The platform configuration JSON
-        type: string
-        required: true
       aws-codeartifact-domain:
-        description: The AWS CodeArtifact domain name
         type: string
-        required: true
+        required: false
+        default: "ignitia"
+        description: "CodeArtifact domain name"
     secrets:
       aws-region:
         description: The region in AWS to push to
@@ -145,6 +142,21 @@ jobs:
         with:
           dotnet-version: '8.x'
       
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.aws-access-key-id }}
+          aws-secret-access-key: ${{ secrets.aws-secret-access-key }}
+          aws-region: ${{ secrets.aws-region }}
+      
+      - name: Login to CodeArtifact
+        run: |
+          aws codeartifact login \
+            --tool dotnet \
+            --domain ${{ inputs.aws-codeartifact-domain }} \
+            --repository ignitia-internal
+          echo "✅ Logged in to CodeArtifact for NuGet packages"
+      
       - name: Build platform CLI
         working-directory: ./platform-tools/Source
         run: |
@@ -158,10 +170,12 @@ jobs:
       
       - name: Update Lambda environment variables
         working-directory: ./cli-output
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.aws-access-key-id }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.aws-secret-access-key }}
+          AWS_REGION: ${{ secrets.aws-region }}
         run: |
           dotnet Ignitia.Clis.Platform.dll aws-lambda-update-environment \
-            --config '${{ inputs.platform-config }}' \
-            --environment ${{ needs.preparations.outputs.environment }} \
             --env-file ../repo/${{ needs.preparations.outputs.environment }}.json \
             --function-name ${{ inputs.lambda-function }}
       
@@ -170,10 +184,12 @@ jobs:
       
       - name: Update Lambda container image
         working-directory: ./cli-output
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.aws-access-key-id }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.aws-secret-access-key }}
+          AWS_REGION: ${{ secrets.aws-region }}
         run: |
           dotnet Ignitia.Clis.Platform.dll aws-lambda-update-image \
-            --config '${{ inputs.platform-config }}' \
-            --environment ${{ needs.preparations.outputs.environment }} \
             --image-uri ${{ inputs.api-image-uri }}:${{ needs.preparations.outputs.api_version }} \
             --function-name ${{ inputs.lambda-function }}
 
@@ -227,9 +243,12 @@ jobs:
       
       - name: Sync UI to S3
         working-directory: ./cli-output
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.aws-access-key-id }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.aws-secret-access-key }}
+          AWS_REGION: ${{ secrets.aws-region }}
         run: |
           dotnet Ignitia.Clis.Platform.dll aws-s3-sync \
-            --config '${{ inputs.platform-config }}' \
             --source ../ui-dist \
             --bucket ${{ inputs.s3-bucket }} \
             --delete \
@@ -237,9 +256,12 @@ jobs:
       
       - name: Invalidate CloudFront cache
         working-directory: ./cli-output
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.aws-access-key-id }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.aws-secret-access-key }}
+          AWS_REGION: ${{ secrets.aws-region }}
         run: |
           dotnet Ignitia.Clis.Platform.dll aws-cloudfront-invalidate \
-            --config '${{ inputs.platform-config }}' \
             --distribution-id ${{ inputs.cloudfront-distribution }} \
             --paths "/*" \
             --wait
