@@ -382,5 +382,4 @@ jobs:
           env-repo-name: ignitia-core/${{ inputs.application }}-${{ inputs.env-repo-suffix }}
           version: ${{ steps.semver.outputs.semantic-version }}
           type: "api"
-        env:
-          GH_TOKEN: ${{ steps.github-pat.outputs.value }}
+          token: ${{ steps.github-pat.outputs.value }}
