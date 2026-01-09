@@ -24,14 +24,28 @@ on:
         description: The region in AWS to push to
         type: string
         required: true
+      ui-repository:
+        description: The GitHub repository for the UI (format owner/repo)
+        type: string
+        required: false
+      s3-bucket:
+        description: The S3 bucket name for UI deployment
+        type: string
+        required: false
+      cloudfront-distribution:
+        description: The CloudFront distribution ID
+        type: string
+        required: false
 
 jobs:
   preparations:
     runs-on: ubuntu-latest
     outputs:
       api_changed: ${{ steps.set_vars.outputs.api_changed }}
+      ui_changed: ${{ steps.set_vars.outputs.ui_changed }}
       environment: ${{ steps.set_vars.outputs.environment }}
       api_version: ${{ steps.api-version.outputs.data }}
+      ui_version: ${{ steps.ui-version.outputs.data }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -66,6 +80,16 @@ jobs:
             API_CHANGED="true"
           fi
           echo "api_changed=$API_CHANGED" >> $GITHUB_OUTPUT
+          
+          # Detect UI changes
+          UI_CHANGED="false"
+          if git diff HEAD^ HEAD --quiet -- ./version-ui.yaml; then
+            echo "No UI changes detected"
+          else
+            echo "UI changes detected"
+            UI_CHANGED="true"
+          fi
+          echo "ui_changed=$UI_CHANGED" >> $GITHUB_OUTPUT
       
       - name: Read API version
         id: api-version
@@ -73,6 +97,14 @@ jobs:
         uses: KJ002/read-yaml@main
         with:
           file: "./version-api.yml"
+          key-path: '["version"]'
+      
+      - name: Read UI version
+        id: ui-version
+        if: steps.set_vars.outputs.ui_changed == 'true'
+        uses: KJ002/read-yaml@main
+        with:
+          file: "./version-ui.yaml"
           key-path: '["version"]'
 
   sync-api:
@@ -112,3 +144,46 @@ jobs:
             --image-uri ${{ inputs.api-image-uri }}:${{ needs.preparations.outputs.api_version }}
           
           echo "✅ Updated Lambda container image to version ${{ needs.preparations.outputs.api_version }}"
+
+  sync-ui:
+    needs: preparations
+    if: needs.preparations.outputs.ui_changed == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+      
+      - name: Download UI release
+        uses: robinraju/release-downloader@v1.8
+        with:
+          repository: ${{ inputs.ui-repository }}
+          tag: ${{ needs.preparations.outputs.ui_version }}
+          fileName: "quasar-web.tar.gz"
+          extract: true
+          token: ${{ secrets.GITHUB_TOKEN }}
+      
+      - name: Configure AWS credentials via OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::246089461294:role/ignitia-github-cicd
+          aws-region: ${{ inputs.aws-region }}
+      
+      - name: Push to Amazon S3
+        run: |
+          aws s3 sync ./ s3://${{ inputs.s3-bucket }} \
+            --acl public-read \
+            --follow-symlinks \
+            --delete
+          
+          echo "✅ Synced UI to S3 bucket ${{ inputs.s3-bucket }}"
+      
+      - name: Invalidate CloudFront
+        run: |
+          aws cloudfront create-invalidation \
+            --distribution-id ${{ inputs.cloudfront-distribution }} \
+            --paths "/*"
+          
+          echo "✅ Invalidated CloudFront distribution ${{ inputs.cloudfront-distribution }}"
