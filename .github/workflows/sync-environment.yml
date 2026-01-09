@@ -1,4 +1,4 @@
-name: Sync Environment Workflow (Platform CLI)
+name: Sync Environment Workflow
 
 permissions:
   contents: write
@@ -12,47 +12,17 @@ concurrency:
 on:
   workflow_call:
     inputs:
-      app-id:
-        description: The unique app identifier in case of a mobile app.
-        type: string
-        required: true
       api-image-uri:
         description: The AWS ECR link to the Docker image repository.
-        type: string
-        required: true
-      cloudfront-distribution:
-        description: The ID of the AWS Cloudfront distribution
         type: string
         required: true
       lambda-function:
         description: The name of the lambda function
         type: string
         required: true
-      s3-bucket:
-        description: The name of the AWS S3 bucket
-        type: string
-        required: true
-      ui-repository:
-        description: The '[org]/[repository]' location of the UI repository
-        type: string
-        required: true
-      aws-codeartifact-domain:
-        type: string
-        required: false
-        default: "ignitia"
-        description: "CodeArtifact domain name"
-    secrets:
       aws-region:
         description: The region in AWS to push to
-        required: true
-      aws-access-key-id:
-        description: The AWS Access Key ID
-        required: true
-      aws-secret-access-key:
-        description: The AWS Secret Access Key
-        required: true
-      pat-github:
-        description: GitHub PAT
+        type: string
         required: true
 
 jobs:
@@ -60,10 +30,8 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       api_changed: ${{ steps.set_vars.outputs.api_changed }}
-      ui_changed: ${{ steps.set_vars.outputs.ui_changed }}
       environment: ${{ steps.set_vars.outputs.environment }}
       api_version: ${{ steps.api-version.outputs.data }}
-      ui_version: ${{ steps.ui-version.outputs.data }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -98,16 +66,6 @@ jobs:
             API_CHANGED="true"
           fi
           echo "api_changed=$API_CHANGED" >> $GITHUB_OUTPUT
-          
-          # Detect UI changes
-          UI_CHANGED="false"
-          if git diff HEAD^ HEAD --quiet -- ./version-ui.yml; then
-            echo "No UI changes detected"
-          else
-            echo "UI changes detected"
-            UI_CHANGED="true"
-          fi
-          echo "ui_changed=$UI_CHANGED" >> $GITHUB_OUTPUT
       
       - name: Read API version
         id: api-version
@@ -116,152 +74,41 @@ jobs:
         with:
           file: "./version-api.yml"
           key-path: '["version"]'
-      
-      - name: Read UI version
-        id: ui-version
-        if: steps.set_vars.outputs.ui_changed == 'true'
-        uses: KJ002/read-yaml@main
-        with:
-          file: "./version-ui.yml"
-          key-path: '["version"]'
 
   sync-api:
     needs: preparations
     if: needs.preparations.outputs.api_changed == 'true'
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout platform tools
+      - name: Checkout repository
         uses: actions/checkout@v4
-        with:
-          repository: ignitia-core/ignitia-tools-generators-platform
-          token: ${{ secrets.pat-github }}
-          path: ./platform-tools
       
-      - name: Setup .NET
-        uses: actions/setup-dotnet@v4
-        with:
-          dotnet-version: '8.x'
-      
-      - name: Configure AWS credentials
+      - name: Configure AWS credentials via OIDC
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          aws-access-key-id: ${{ secrets.aws-access-key-id }}
-          aws-secret-access-key: ${{ secrets.aws-secret-access-key }}
-          aws-region: ${{ secrets.aws-region }}
-      
-      - name: Login to CodeArtifact
-        run: |
-          aws codeartifact login \
-            --tool dotnet \
-            --domain ${{ inputs.aws-codeartifact-domain }} \
-            --repository ignitia-internal
-          echo "✅ Logged in to CodeArtifact for NuGet packages"
-      
-      - name: Build platform CLI
-        working-directory: ./platform-tools/Source
-        run: |
-          dotnet build Ignitia.Clis.Platform.sln -c Release
-          dotnet publish Assemblies/Ignitia.Clis.Platform/Ignitia.Clis.Platform.csproj -c Release -o ../../cli-output
-      
-      - name: Checkout calling repository
-        uses: actions/checkout@v4
-        with:
-          path: ./repo
+          role-to-assume: arn:aws:iam::246089461294:role/ignitia-github-cicd
+          aws-region: ${{ inputs.aws-region }}
       
       - name: Update Lambda environment variables
-        working-directory: ./cli-output
-        env:
-          AWS_ACCESS_KEY_ID: ${{ secrets.aws-access-key-id }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.aws-secret-access-key }}
-          AWS_REGION: ${{ secrets.aws-region }}
         run: |
-          dotnet Ignitia.Clis.Platform.dll aws-lambda-update-environment \
-            --env-file ../repo/${{ needs.preparations.outputs.environment }}.json \
-            --function-name ${{ inputs.lambda-function }}
+          # Convert each JSON key-value pair into an environment variable string, preserving quotes around string values
+          env_vars=$(jq -r 'to_entries | map("\(.key)=\(.value|tojson)") | .[]' ${{ needs.preparations.outputs.environment }}.json)
+          # Convert newline-separated key-value pairs to a comma-separated list
+          env_vars_formatted=$(echo "$env_vars" | paste -sd, -)
+          # Update the Lambda function configuration with the new environment variables
+          aws lambda update-function-configuration --function-name ${{ inputs.lambda-function }} --environment "Variables={${env_vars_formatted}}"
+          
+          echo "✅ Updated Lambda environment variables"
       
       - name: Wait for Lambda configuration update
-        run: sleep 40
+        run: |
+          aws lambda wait function-updated --function-name ${{ inputs.lambda-function }}
+          echo "✅ Lambda configuration update completed"
       
       - name: Update Lambda container image
-        working-directory: ./cli-output
-        env:
-          AWS_ACCESS_KEY_ID: ${{ secrets.aws-access-key-id }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.aws-secret-access-key }}
-          AWS_REGION: ${{ secrets.aws-region }}
         run: |
-          dotnet Ignitia.Clis.Platform.dll aws-lambda-update-image \
-            --image-uri ${{ inputs.api-image-uri }}:${{ needs.preparations.outputs.api_version }} \
-            --function-name ${{ inputs.lambda-function }}
-
-  sync-ui:
-    needs: preparations
-    if: needs.preparations.outputs.ui_changed == 'true'
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout platform tools
-        uses: actions/checkout@v4
-        with:
-          repository: ignitia-core/ignitia-tools-generators-platform
-          token: ${{ secrets.pat-github }}
-          path: ./platform-tools
-      
-      - name: Setup .NET
-        uses: actions/setup-dotnet@v4
-        with:
-          dotnet-version: '8.x'
-      
-      - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          aws-access-key-id: ${{ secrets.aws-access-key-id }}
-          aws-secret-access-key: ${{ secrets.aws-secret-access-key }}
-          aws-region: ${{ secrets.aws-region }}
-      
-      - name: Login to CodeArtifact
-        run: |
-          aws codeartifact login \
-            --tool dotnet \
-            --domain ${{ inputs.aws-codeartifact-domain }} \
-            --repository ignitia-internal
-          echo "✅ Logged in to CodeArtifact for NuGet packages"
-      
-      - name: Build platform CLI
-        working-directory: ./platform-tools/Source
-        run: |
-          dotnet build Ignitia.Clis.Platform.sln -c Release
-          dotnet publish Assemblies/Ignitia.Clis.Platform/Ignitia.Clis.Platform.csproj -c Release -o ../../cli-output
-      
-      - name: Download UI release artifact
-        uses: robinraju/release-downloader@v1.11
-        with:
-          repository: ${{ inputs.ui-repository }}
-          tag: ${{ needs.preparations.outputs.ui_version }}
-          fileName: "quasar-web.tar.gz"
-          extract: true
-          token: ${{ secrets.pat-github }}
-          out-file-path: ./ui-dist
-      
-      - name: Sync UI to S3
-        working-directory: ./cli-output
-        env:
-          AWS_ACCESS_KEY_ID: ${{ secrets.aws-access-key-id }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.aws-secret-access-key }}
-          AWS_REGION: ${{ secrets.aws-region }}
-        run: |
-          dotnet Ignitia.Clis.Platform.dll aws-s3-sync \
-            --source ../ui-dist \
-            --bucket ${{ inputs.s3-bucket }} \
-            --delete \
-            --acl public-read
-      
-      - name: Invalidate CloudFront cache
-        working-directory: ./cli-output
-        env:
-          AWS_ACCESS_KEY_ID: ${{ secrets.aws-access-key-id }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.aws-secret-access-key }}
-          AWS_REGION: ${{ secrets.aws-region }}
-        run: |
-          dotnet Ignitia.Clis.Platform.dll aws-cloudfront-invalidate \
-            --distribution-id ${{ inputs.cloudfront-distribution }} \
-            --paths "/*" \
-            --wait
+          aws lambda update-function-code \
+            --function-name ${{ inputs.lambda-function }} \
+            --image-uri ${{ inputs.api-image-uri }}:${{ needs.preparations.outputs.api_version }}
+          
+          echo "✅ Updated Lambda container image to version ${{ needs.preparations.outputs.api_version }}"
