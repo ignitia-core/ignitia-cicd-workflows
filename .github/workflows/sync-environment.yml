@@ -12,26 +12,22 @@ concurrency:
 on:
   workflow_call:
     inputs:
-      api-image-uri:
-        description: The AWS ECR link to the Docker image repository.
+      application:
+        description: The application name (used to construct resource names)
         type: string
         required: true
-      lambda-function:
-        description: The name of the lambda function
+      environment:
+        description: The environment (development or production)
+        type: string
+        required: true
+      api-image-uri:
+        description: The AWS ECR link to the Docker image repository.
         type: string
         required: true
       aws-region:
         description: The region in AWS to push to
         type: string
         required: true
-      ui-repository:
-        description: The GitHub repository for the UI (format owner/repo)
-        type: string
-        required: false
-      s3-bucket:
-        description: The S3 bucket name for UI deployment
-        type: string
-        required: false
       cloudfront-distribution:
         description: The CloudFront distribution ID
         type: string
@@ -55,19 +51,7 @@ jobs:
       - name: Determine environment and detect changes
         id: set_vars
         run: |
-          BRANCH_NAME="${{ github.ref_name }}"
-          echo "Branch name: $BRANCH_NAME"
-          
-          # Determine environment based on branch
-          if [ "$BRANCH_NAME" = "development" ]; then
-            ENVIRONMENT="development"
-          elif [ "$BRANCH_NAME" = "production" ]; then
-            ENVIRONMENT="production"
-          else
-            echo "Error: Workflow only supports 'development' or 'production' branches"
-            exit 1
-          fi
-          
+          ENVIRONMENT="${{ inputs.environment }}"
           echo "Environment: $ENVIRONMENT"
           echo "environment=$ENVIRONMENT" >> $GITHUB_OUTPUT
           
@@ -123,24 +107,28 @@ jobs:
       
       - name: Update Lambda environment variables
         run: |
+          LAMBDA_FUNCTION="${{ inputs.application }}-${{ inputs.environment }}"
+          
           # Convert each JSON key-value pair into an environment variable string, preserving quotes around string values
           env_vars=$(jq -r 'to_entries | map("\(.key)=\(.value|tojson)") | .[]' ${{ needs.preparations.outputs.environment }}.json)
           # Convert newline-separated key-value pairs to a comma-separated list
           env_vars_formatted=$(echo "$env_vars" | paste -sd, -)
           # Update the Lambda function configuration with the new environment variables
-          aws lambda update-function-configuration --function-name ${{ inputs.lambda-function }} --environment "Variables={${env_vars_formatted}}"
+          aws lambda update-function-configuration --function-name "$LAMBDA_FUNCTION" --environment "Variables={${env_vars_formatted}}"
           
-          echo "✅ Updated Lambda environment variables"
+          echo "✅ Updated Lambda environment variables for $LAMBDA_FUNCTION"
       
       - name: Wait for Lambda configuration update
         run: |
-          aws lambda wait function-updated --function-name ${{ inputs.lambda-function }}
+          LAMBDA_FUNCTION="${{ inputs.application }}-${{ inputs.environment }}"
+          aws lambda wait function-updated --function-name "$LAMBDA_FUNCTION"
           echo "✅ Lambda configuration update completed"
       
       - name: Update Lambda container image
         run: |
+          LAMBDA_FUNCTION="${{ inputs.application }}-${{ inputs.environment }}"
           aws lambda update-function-code \
-            --function-name ${{ inputs.lambda-function }} \
+            --function-name "$LAMBDA_FUNCTION" \
             --image-uri ${{ inputs.api-image-uri }}:${{ needs.preparations.outputs.api_version }}
           
           echo "✅ Updated Lambda container image to version ${{ needs.preparations.outputs.api_version }}"
@@ -153,32 +141,38 @@ jobs:
       contents: read
       id-token: write
     steps:
-      - name: Checkout Repository
-        uses: actions/checkout@v4
-      
-      - name: Download UI release
-        uses: robinraju/release-downloader@v1.8
-        with:
-          repository: ${{ inputs.ui-repository }}
-          tag: ${{ needs.preparations.outputs.ui_version }}
-          fileName: "quasar-web.tar.gz"
-          extract: true
-          token: ${{ secrets.GITHUB_TOKEN }}
-      
       - name: Configure AWS credentials via OIDC
         uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: arn:aws:iam::246089461294:role/ignitia-github-cicd
           aws-region: ${{ inputs.aws-region }}
       
+      - name: Download UI from S3 Registry
+        run: |
+          REGISTRY_BUCKET="${{ inputs.application }}-registry"
+          VERSION="${{ needs.preparations.outputs.ui_version }}"
+          FILE_NAME="${VERSION}.tar.gz"
+          
+          aws s3 cp "s3://${REGISTRY_BUCKET}/${FILE_NAME}" ./ui-package.tar.gz
+          
+          echo "✅ Downloaded ${FILE_NAME} from s3://${REGISTRY_BUCKET}"
+      
+      - name: Extract UI package
+        run: |
+          mkdir -p ./ui-dist
+          tar -xzf ./ui-package.tar.gz -C ./ui-dist
+          
+          echo "✅ Extracted UI package"
+      
       - name: Push to Amazon S3
         run: |
-          aws s3 sync ./ s3://${{ inputs.s3-bucket }} \
+          S3_BUCKET="${{ inputs.application }}-${{ inputs.environment }}"
+          aws s3 sync ./ui-dist/ "s3://${S3_BUCKET}" \
             --acl public-read \
             --follow-symlinks \
             --delete
           
-          echo "✅ Synced UI to S3 bucket ${{ inputs.s3-bucket }}"
+          echo "✅ Synced UI to S3 bucket ${S3_BUCKET}"
       
       - name: Invalidate CloudFront
         run: |

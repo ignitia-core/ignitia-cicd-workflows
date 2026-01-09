@@ -219,17 +219,17 @@ jobs:
             echo "✅ Created release $tag"
           fi
 
-      - name: Upload quasar-web.tar.gz to Release
+      - name: Upload quasar-web.tar.gz to S3 Registry
         if: github.ref == 'refs/heads/master' || github.ref == 'refs/heads/main'
         working-directory: ${{ inputs.source-folder }}/dist/spa
-        env:
-          GH_TOKEN: ${{ steps.github-pat.outputs.value }}
         run: |
-          gh release upload "${{ steps.semver.outputs.semantic-version }}" \
-            quasar-web.tar.gz \
-            --repo "${{ inputs.repository }}" \
-            --clobber
-          echo "✅ Uploaded quasar-web.tar.gz to release"
+          BUCKET_NAME="${{ inputs.application }}-registry"
+          VERSION="${{ steps.semver.outputs.semantic-version }}"
+          FILE_NAME="${VERSION}.tar.gz"
+          
+          aws s3 cp quasar-web.tar.gz "s3://${BUCKET_NAME}/${FILE_NAME}"
+          
+          echo "✅ Uploaded ${FILE_NAME} to s3://${BUCKET_NAME}"
 
       - name: Cleanup Old Releases & Tags
         if: github.ref == 'refs/heads/master' || github.ref == 'refs/heads/main'
